@@ -17,6 +17,8 @@ export class LocalSource {
     this.audio.addEventListener('error', () => this.onStatus?.('local', 'error', 'This audio cannot be played.'));
   }
 
+  setVolume(v) { this.audio.volume = v; }
+
   load(files) {
     const list = [...files].filter((f) => f.type.startsWith('audio/') || /\.(mp3|m4a|aac|flac|wav|ogg|opus)$/i.test(f.name));
     if (!list.length) throw new Error('No audio files found.');

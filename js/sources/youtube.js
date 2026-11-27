@@ -104,7 +104,7 @@ export class YouTubeSource {
           videoId: ref.video,
           playerVars: vars,
           events: {
-            onReady: () => resolve(),
+            onReady: () => { this.player.setVolume?.(Math.round((this.volume ?? .8) * 100)); resolve(); },
             onStateChange: () => this.tick(),
             onError: (e) => {
               const msg = { 2: 'Invalid YouTube id.', 5: 'This video cannot play here.', 100: 'Video not found.', 101: 'The owner does not allow embedding.', 150: 'The owner does not allow embedding.' }[e.data] || 'YouTube error.';
@@ -128,7 +128,10 @@ export class YouTubeSource {
     if (!data.video_id) return;
     const { artist, title } = splitTitle(data.title || '', data.author || '');
     const dur = p.getDuration?.() || 0;
-    const live = !!data.isLive || dur === 0 || dur > 6 * 3600;
+    // right after loading, the duration reads 0 until the video's metadata arrives: that is "unknown",
+    // not "live" (and lyrics are looked up once per track, so a wrong first guess would stick)
+    if (!data.isLive && dur === 0) return;
+    const live = !!data.isLive || dur > 6 * 3600;
     this.onState({
       source: 'youtube',
       track: {
@@ -157,6 +160,7 @@ export class YouTubeSource {
     else p.previousVideo();
   }
   seek(ms) { this.player?.seekTo?.(ms / 1000, true); }
+  setVolume(v) { this.volume = v; this.player?.setVolume?.(Math.round(v * 100)); }
   stop() {
     clearInterval(this.timer);
     this.player?.pauseVideo?.();

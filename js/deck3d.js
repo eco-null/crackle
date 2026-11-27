@@ -60,6 +60,7 @@ const REST = 0;
 
 const approach = (cur, target, rate, dt) => cur + (target - cur) * (1 - Math.exp(-rate * dt));
 const smooth = (t) => t * t * (3 - 2 * t);
+const KNOB_MIN = 2.36, KNOB_MAX = -2.36;                    // knob angle at volume 0 and 1 (rad)
 
 // ---------- generated textures ----------
 function dataTex(w, h, data, { srgb = false, repeat = false } = {}) {
@@ -498,6 +499,7 @@ export class Turntable {
     this.speedSetting = '33';
     this.pitch = 0;
     this.lamp = true;
+    this.volume = .8;                     // 0..1, shown by the knob; the app owns the real level
     this.zoom = this.zoomTarget = 1;      // focus-mode wheel zoom
     this.showcase = this.showcaseTarget = 0; // three-quarter turn while the look sheets are open
     // simulated state
@@ -1024,7 +1026,7 @@ export class Turntable {
     for (const [k, g] of [['33', this.speed33], ['45', this.speed45], ['78', this.speed78]]) this.leds[k] = this.ledDome(g.position.x, g.position.z - 1.4);
     this.decal('SPEED', 3.2, .8, { px: 56, weight: 600, spacing: .3 }, this.deck, [17.7, TOP + .005, 13.55], true);
 
-    // power knob: knurled skirt, brushed circular top, white index
+    // volume knob: knurled skirt, brushed circular top, white index; its sweep runs from 7 to 5 o'clock
     const kg = new THREE.Group();
     kg.position.set(19.9, TOP, 10.4);
     this.deck.add(kg);
@@ -1038,8 +1040,17 @@ export class Turntable {
     const index = add(new THREE.Mesh(new THREE.BoxGeometry(.1, .02, .65), new THREE.MeshStandardMaterial({ color: '#f1ede4', roughness: .5 })), kg);
     index.position.set(0, 1.21, -.8);
     this.knob = kg;
-    this.leds.power = this.ledDome(17.9, 10.4);
-    this.decal('POWER', 2.6, .65, { px: 56, weight: 600, spacing: .3 }, this.deck, [19.9, TOP + .005, 12.55], true);
+    for (const m of [kside, ktop]) { m.userData.act = 'volume'; this.pickables.push(m); }
+    // printed scale around it: eleven ticks, the last one longer
+    for (let i = 0; i <= 10; i++) {
+      const th = KNOB_MIN - i / 10 * (KNOB_MIN - KNOB_MAX), r = 1.88;
+      const tick = new THREE.Mesh(new THREE.PlaneGeometry(.07, i === 10 ? .42 : .26), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: .6, transparent: true, polygonOffset: true, polygonOffsetFactor: -2 }));
+      tick.rotation.set(-Math.PI / 2, 0, th);
+      tick.position.set(19.9 - r * Math.sin(th), TOP + .006, 10.4 - r * Math.cos(th));
+      this.deck.add(tick); this.silkMats.push(tick.material);
+    }
+    this.leds.power = this.ledDome(17.15, 10.4);
+    this.decal('VOLUME', 2.8, .65, { px: 56, weight: 600, spacing: .3 }, this.deck, [19.9, TOP + .005, 12.75], true);
 
     // pitch fader: slot, printed scale, brushed cap with a centre line, zero LED
     const slot = add(new THREE.Mesh(new RoundedBoxGeometry(.7, .2, 10, 2, .1), new THREE.MeshStandardMaterial({ color: '#050505', roughness: .9 })));
@@ -1307,6 +1318,11 @@ export class Turntable {
       const r = this.canvas.getBoundingClientRect();
       if (e.pointerType === 'mouse') { this.pointer.tx = (e.clientX - r.left) / r.width - .5; this.pointer.ty = (e.clientY - r.top) / r.height - .5; }
       if (this.dragArm) { const a = armAngleAt(e); if (a != null) this.dragArm.angle = a; return; }
+      if (this.dragVol) {
+        const d = this.dragVol, v = Math.max(0, Math.min(1, d.start + ((d.y - e.clientY) + (e.clientX - d.x)) / 170));
+        if (v !== this.volume) { this.volume = v; this.onVolume?.(v); }
+        return;
+      }
       if (this.dragPitch) {
         const v = this.dragPitch.start + (e.clientY - this.dragPitch.y) / 14;
         this.pitch = Math.abs(v) < .4 ? 0 : Math.max(-8, Math.min(8, v));
@@ -1325,6 +1341,9 @@ export class Turntable {
       } else if (act === 'pitch') {
         this.canvas.setPointerCapture(e.pointerId);
         this.dragPitch = { y: e.clientY, start: this.pitch };
+      } else if (act === 'volume') {
+        this.canvas.setPointerCapture(e.pointerId);
+        this.dragVol = { x: e.clientX, y: e.clientY, start: this.volume };
       } else {
         this.pressAnim(act);
         if (act === 'start') this.onStartStop?.();
@@ -1332,8 +1351,16 @@ export class Turntable {
         else { this.setSpeed(+act); this.onSpeed?.(+act); }
       }
     });
+    // the wheel over the knob turns it (and does not reach the focus-mode zoom)
+    this.canvas.addEventListener('wheel', (e) => {
+      if (pick(e)?.userData.act !== 'volume') return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      const v = Math.max(0, Math.min(1, this.volume - Math.sign(e.deltaY) * .04));
+      if (v !== this.volume) { this.volume = v; this.onVolume?.(v); }
+    }, { passive: false });
     const end = () => {
       this.dragPitch = null;
+      this.dragVol = null;
       if (!this.dragArm) return;
       const a = this.dragArm.angle;
       this.dragArm = null;
@@ -1610,7 +1637,7 @@ export class Turntable {
     setLed('zero', this.loaded && this.pitch === 0, this.zeroColor || (this.zeroColor = new THREE.Color('#5be08f')));
 
     // knob, fader and lid move on critically damped springs
-    this.knob.rotation.y = spring('knobVel', this.knob.rotation.y, this.loaded ? -.8 : 0, 60);
+    this.knob.rotation.y = spring('knobVel', this.knob.rotation.y, KNOB_MIN + this.volume * (KNOB_MAX - KNOB_MIN), 90);
     this.fader.position.z = spring('faderVel', this.fader.position.z, 1.6 + this.pitch / 8 * 4.4, 220);
     this.lidOpen = Math.max(0, Math.min(1, spring('lidVel', this.lidOpen, this.lidClosed ? 0 : 1, 9)));
     this.lid.rotation.x = -this.lidOpen * 1.45;
@@ -1642,7 +1669,7 @@ export class Turntable {
     const moving = [this.armAngle, this.lift, this.lidOpen, this.knob.rotation.y, this.fader.position.z, this.lampUp, this.lampLevel, this.zoom, this.showcase, this.pointer.x, this.pointer.y];
     const prev = this.movingPrev;
     this.movingPrev = moving;
-    this.busy = this.platterVel > .3 || !!this.recordSwap || !!this.regionAnim || !!this.pressing || !!this.dragArm || !!this.dragPitch
+    this.busy = this.platterVel > .3 || !!this.recordSwap || !!this.regionAnim || !!this.pressing || !!this.dragArm || !!this.dragPitch || !!this.dragVol
       || this.intro < 1 || !prev || moving.some((v, i) => Math.abs(v - prev[i]) > 1e-4);
   }
 }

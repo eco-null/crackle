@@ -218,6 +218,12 @@ body.idle, body.idle * { cursor: none !important; }
 
 #yt-card { position: fixed; right: 2.4vw; bottom: 3.6vh; z-index: 7; width: 320px; height: 216px; border-radius: 16px; overflow: hidden; padding: 0 4px 4px; display: flex; flex-direction: column; }
 #yt-card[hidden] { display: none; }
+/* volume: a vertical slider that rises above the dock's speaker button */
+#vol-pop { position: fixed; z-index: 9; display: flex; flex-direction: column; align-items: center; gap: .55rem; padding: .75rem .4rem .65rem; border-radius: 999px; animation: vol-in .2s var(--ease); }
+#vol-pop[hidden] { display: none; }
+#vol-pop .mono { min-width: 2ch; text-align: center; font-size: .68rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+#vol { writing-mode: vertical-lr; direction: rtl; width: 1.5rem; height: 9.5rem; margin: 0; accent-color: var(--ink); cursor: pointer; }
+@keyframes vol-in { from { opacity: 0; transform: translateY(.4rem); } }
 /* cover mode: the card fills a 16:9 slot that takes the cover's place in the panel; app.js keeps it aligned */
 #yt-slot { display: none; }
 body.yt-panel #cover { display: none; }

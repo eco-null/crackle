@@ -41,11 +41,17 @@ export async function fetchLyrics({ artist, title, album, duration }, signal) {
     if (duration) q.set('duration', Math.round(duration / 1000));
     hit = await getJson(`${API}/get?${q}`, signal).catch((e) => { if (e.name === 'AbortError') throw e; return null; });
   }
+  const near = (x) => !duration || Math.abs(x.duration * 1000 - duration) < 8000;
+  const pick = (list) => list.find((x) => x.syncedLyrics && near(x)) || list.find((x) => x.syncedLyrics) || list.find((x) => x.plainLyrics);
   if (!hit || (!hit.syncedLyrics && !hit.plainLyrics && !hit.instrumental)) {
     const q = new URLSearchParams(a ? { track_name: t, artist_name: a } : { q: t });
-    const list = (await getJson(`${API}/search?${q}`, signal)) || [];
-    const near = (x) => !duration || Math.abs(x.duration * 1000 - duration) < 8000;
-    hit = list.find((x) => x.syncedLyrics && near(x)) || list.find((x) => x.syncedLyrics) || list.find((x) => x.plainLyrics) || hit;
+    hit = pick((await getJson(`${API}/search?${q}`, signal)) || []) || hit;
+  }
+  // video titles and channel names are loose ("Artist - Topic", a label's channel): fall back to a
+  // free-text search, keeping only a match of the same length so a different song is not shown
+  if (!hit || (!hit.syncedLyrics && !hit.plainLyrics && !hit.instrumental)) {
+    const list = (await getJson(`${API}/search?${new URLSearchParams({ q: `${a} ${t}`.trim() })}`, signal)) || [];
+    hit = (duration ? list.filter(near) : list).find((x) => x.syncedLyrics || x.plainLyrics) || hit;
   }
   const result = hit ? { synced: parseLrc(hit.syncedLyrics), plain: hit.plainLyrics || '', instrumental: !!hit.instrumental } : null;
   cache.set(key, result);

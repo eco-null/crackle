@@ -153,9 +153,21 @@ export class SpotifySource {
   // Browsers block audio until a user gesture: call this synchronously inside the click handler.
   // The same gesture lets Firefox and its forks show their "allow DRM content" prompt.
   prime() {
-    try { this.player?.activateElement?.(); } catch { /* older SDK */ }
+    this.unlockAudio();
     if (!this.drmOk) this.requestDrm();       // asked inside the click, so the browser may prompt
   }
+
+  // The SDK plays from its own iframe, which never receives a click itself: browsers keep its audio
+  // locked until activateElement() runs inside a user gesture on this page. Any click or key press
+  // will do (app.js forwards them all), once per player instance.
+  unlockAudio() {
+    const p = this.player;
+    if (!p || this.unlocked === p) return;
+    try { p.activateElement?.(); this.unlocked = p; } catch { /* older SDK */ }
+    if (this.autoplayBlocked) { this.autoplayBlocked = false; p.resume?.().catch?.(() => {}); }
+  }
+
+
 
   // Ask the browser for protected playback. Call it from a click: Firefox-family browsers answer with
   // their DRM permission prompt. Once allowed, the in-browser player starts without a reload.
@@ -228,7 +240,7 @@ export class SpotifySource {
         const player = new window.Spotify.Player({
           name: 'Crackle',
           getOAuthToken: (cb) => this.token().then(cb).catch(() => {}),
-          volume: 0.8,
+          volume: this.volume ?? .8,
         });
         this.player = player;
         player.addListener('ready', ({ device_id }) => {
@@ -264,6 +276,12 @@ export class SpotifySource {
           fail('auth', message);
         });
         player.addListener('player_state_changed', (s) => this.fromSdk(s));
+        // the browser refused to start the audio: the next click anywhere unlocks it and resumes
+        player.addListener('autoplay_failed', () => { this.autoplayBlocked = true; this.unlocked = null; this.onNotice?.('autoplay'); });
+        player.addListener('playback_error', ({ message }) => {
+          console.warn('[crackle] Spotify playback error in the browser', { message, browser: navigator.userAgent });
+          this.onNotice?.('playback-error', message);
+        });
         player.connect().then((ok) => { if (!ok && !this.authRetried) fail('connect', 'connect() returned false'); });
       };
       if (!document.querySelector('script[data-spotify-sdk]')) {
@@ -367,6 +385,8 @@ export class SpotifySource {
         const p = await this.api('/me/player?additional_types=episode');
         if (p && p.item) {
           this.onStatus?.('spotify', p.device?.id && p.device.id === this.deviceId ? 'ready' : 'remote');
+          // follow volume changes made in the Spotify app
+          if (typeof p.device?.volume_percent === 'number' && p.device.id !== this.deviceId) this.onVolume?.(p.device.volume_percent / 100);
           this.onState(this.mapTrack(p.item, { playing: p.is_playing, position: p.progress_ms, device: p.device?.name || '' }));
         } else {
           this.onStatus?.('spotify', 'idle');
@@ -415,6 +435,16 @@ export class SpotifySource {
   async playUri(uri) {
     await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: [uri] } }));
     setTimeout(() => this.poll(), 600);
+  }
+
+  // In the browser the SDK player's own level; when following the account, the playing device's
+  // level through the Web API (debounced: a knob turn is many small steps)
+  setVolume(v) {
+    this.volume = v;
+    this.player?.setVolume?.(v)?.catch?.(() => {});
+    if (this.sdkActive || !this.connected || !this.pollTimer) return;
+    clearTimeout(this.volTimer);
+    this.volTimer = setTimeout(() => this.api(`/me/player/volume?volume_percent=${Math.round(v * 100)}`, { method: 'PUT' }).catch(() => {}), 250);
   }
 
   async seek(ms) {

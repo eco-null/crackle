@@ -12,7 +12,7 @@ const body = document.body;
 const PREFS_KEY = 'vinyl.prefs.v2';
 const prefs = Object.assign({
   material: 'walnut', vinyl: 'black', room: 'cream', lyrics: true, lid: false, focus: false, focusLyrics: false,
-  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver', ytPanel: false, ytGhost: false,
+  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver', volume: .8, ytPanel: false, ytGhost: false,
 }, (() => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; } })());
 const save = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* private mode */ } };
 // rooms renamed when the photographed set replaced the first backdrops
@@ -49,6 +49,13 @@ const onStatus = (src, st, msg) => {
 };
 
 const spotify = new SpotifySource({ onState, onStatus });
+// every click or key press can unlock the Spotify player's audio (see SpotifySource.unlockAudio)
+for (const type of ['pointerdown', 'keydown']) addEventListener(type, () => spotify.unlockAudio(), { capture: true });
+spotify.onNotice = (kind, message) => {
+  if (kind === 'autoplay') { toast('Click anywhere to start the music.'); return; }
+  // the browser's DRM licence was refused mid-song (Zen, for one, has no Widevine licence yet)
+  if (kind === 'playback-error') toast(`Spotify stopped: this browser's protected-audio licence was refused${message ? ` (${message})` : ''}. Spotify plays fully in Firefox, Chrome and Edge.`, true);
+};
 const youtube = new YouTubeSource({ onState, onStatus, mount: $('#yt-mount') });
 const local = new LocalSource({ onState, onStatus });
 
@@ -238,7 +245,8 @@ async function loadLyrics(t) {
   if (t.live) { setLyrics(null, 'live stream'); return; }
   setLyrics(null, 'looking for lyrics');
   try {
-    const r = await fetchLyrics(t, lyricCtl.signal);
+    // a YouTube "album" is the channel name: leave it out of the lookup
+    const r = await fetchLyrics(active === youtube ? { ...t, album: '' } : t, lyricCtl.signal);
     if (state.track?.id !== t.id) return;
     setLyrics(r, r?.instrumental ? 'instrumental' : 'no lyrics found');
   } catch (e) {
@@ -446,7 +454,7 @@ function wake() {
   body.classList.remove('idle');
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
-    if (document.querySelector('dialog[open]') || $('#dock').matches(':hover') || document.activeElement === $('#q')) return;
+    if (document.querySelector('dialog[open]') || $('#dock').matches(':hover') || !$('#vol-pop').hidden || document.activeElement === $('#q')) return;
     body.classList.add('idle');
     if (document.activeElement?.closest('#dock, #transport')) document.activeElement.blur();
   }, 4000);
@@ -666,6 +674,40 @@ function layoutYt() {
   placeYtCard();
 })();
 
+// ---------- volume: one level for Spotify, YouTube and files; the deck's knob, the dock slider and
+// the - and + keys all set it, and a change made in the Spotify app turns the knob too ----------
+let volSave, lastUserVolume = 0;
+function setVolume(v, { fromSource = false } = {}) {
+  v = Math.max(0, Math.min(1, Math.round(v * 100) / 100));
+  prefs.volume = v;
+  clearTimeout(volSave); volSave = setTimeout(save, 400);
+  tt.volume = v;
+  if (!fromSource) { lastUserVolume = Date.now(); spotify.setVolume(v); } else spotify.volume = v;
+  youtube.setVolume(v);
+  local.setVolume(v);
+  const pct = Math.round(v * 100);
+  if (+$('#vol').value !== pct) $('#vol').value = pct;
+  $('#vol-val').textContent = pct;
+  $('#b-vol use').setAttribute('href', v === 0 ? '#i-mute' : v < .45 ? '#i-vol-low' : '#i-vol');
+}
+tt.onVolume = (v) => setVolume(v);
+spotify.onVolume = (v) => { if (Date.now() - lastUserVolume > 2500 && Math.abs(v - prefs.volume) > .005) setVolume(v, { fromSource: true }); };
+function placeVolPop() {
+  const b = $('#b-vol').getBoundingClientRect(), pop = $('#vol-pop');
+  pop.style.left = `${Math.round(b.left + b.width / 2 - pop.offsetWidth / 2)}px`;
+  pop.style.bottom = `${Math.round(innerHeight - b.top + 10)}px`;
+}
+function toggleVolPop(open = $('#vol-pop').hidden) {
+  $('#vol-pop').hidden = !open;
+  $('#b-vol').setAttribute('aria-expanded', String(open));
+  if (open) placeVolPop();
+}
+$('#b-vol').addEventListener('click', () => toggleVolPop());
+$('#vol').addEventListener('input', (e) => setVolume(+e.target.value / 100));
+addEventListener('pointerdown', (e) => { if (!$('#vol-pop').hidden && !e.target.closest('#vol-pop, #b-vol')) toggleVolPop(false); });
+addEventListener('resize', () => { if (!$('#vol-pop').hidden) placeVolPop(); });
+setVolume(prefs.volume, { fromSource: true });
+
 // ---------- input ----------
 $('#b-play').addEventListener('click', togglePlay);
 $('#b-next').addEventListener('click', next);
@@ -723,6 +765,7 @@ window.addEventListener('keydown', (e) => {
     f: () => setFocus(!prefs.focus), c: () => setLid(!prefs.lid),
     l: () => (prefs.focus ? setFocusLyrics(!prefs.focusLyrics) : setLyricsOn(!prefs.lyrics)),
     0: () => tt.setZoom(1),
+    '-': () => setVolume(prefs.volume - .05), '=': () => setVolume(prefs.volume + .05), '+': () => setVolume(prefs.volume + .05),
     m: () => { cycle(MATERIALS, 'material', e.shiftKey ? -1 : 1); applyLook(); },
     v: () => { cycle(VINYLS, 'vinyl', 1, (v) => `${v.name} pressing`); applyLook(); },
     r: () => { cycle(ROOMS, 'room', 1, (r) => `${r.name} room`); applyRoom(); },
