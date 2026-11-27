@@ -454,6 +454,7 @@ function setFocus(on) {
   body.classList.toggle('focus', on);
   setToggle('#b-focus', on);
   if (!on) tt.setZoom(1);
+  if (on && prefs.focusLyrics) setFocusLyrics(false);   // focus starts with the record alone
   syncLyricsBox();
   requestAnimationFrame(() => placeDeck());
 }
@@ -704,7 +705,7 @@ buildSheets();
 applyLook();
 applyRoom();
 setFocus(prefs.focus);
-setFocusLyrics(prefs.focusLyrics);
+setFocusLyrics(false);
 setLyricsOn(prefs.lyrics);
 setLid(prefs.lid);
 tickClock();

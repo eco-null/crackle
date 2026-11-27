@@ -95,6 +95,13 @@ body.focus #deck-zone { left: 4vw; right: 4vw; top: 4vh; bottom: 10vh; }
 .brand { display: flex; align-items: center; gap: .55rem; font-weight: 600; font-size: .95rem; letter-spacing: -.01em; color: var(--ink-2); transition: opacity .5s var(--ease); }
 .brand img { width: 1.5rem; height: 1.5rem; border-radius: 7px; }
 .clock { font-size: .95rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.top-right { display: flex; align-items: center; gap: 1.4rem; }
+/* focus mode: a quiet note on how to zoom; gone with the rest of the chrome when idle */
+#zoom-hint { display: flex; align-items: center; gap: .45rem; font-size: .74rem; letter-spacing: .01em; color: var(--ink-2); opacity: 0; transition: opacity .6s var(--ease); }
+#zoom-hint svg { width: 1.05rem; height: 1.05rem; stroke-width: 1.4; }
+body.focus #zoom-hint { opacity: .5; }
+body.focus.idle #zoom-hint { opacity: 0; }
+@media (hover: none), (pointer: coarse) { #zoom-hint { display: none; } }
 
 /* ---------- panel ---------- */
 #panel {
