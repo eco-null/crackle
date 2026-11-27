@@ -61,6 +61,40 @@ const REST = 0;
 const approach = (cur, target, rate, dt) => cur + (target - cur) * (1 - Math.exp(-rate * dt));
 const smooth = (t) => t * t * (3 - 2 * t);
 const KNOB_MIN = 2.36, KNOB_MAX = -2.36;                    // knob angle at volume 0 and 1 (rad)
+const SELECTOR = { 33: .7, 45: 0, 78: -.7 };                // rotary speed selector detents (rad)
+
+// Control layouts: where the hardware sits around the platter and arm, which never move. The plinth
+// top runs x −22.5…22.5 (left to right) and z −17.5…17.5 (back to front); the platter covers x < 10.6
+// and the arm owns the back right, so controls live in the corners and the right-hand column.
+// Points are [x, z]; labels are printed on the body.
+export const LAYOUTS = {
+  // speed buttons along the front, volume and pitch down the right
+  classic: {
+    name: 'Classic', note: 'front row',
+    start: { x: -18.6, z: 14.9 },
+    speeds: { at: [[14.9, 15.6], [17.7, 15.6], [20.5, 15.6]], led: [0, -1.4], label: [17.7, 13.55] },
+    knob: { x: 19.9, z: 10.4, s: 1, led: [17.15, 10.4], label: [19.9, 12.75] },
+    fader: { x: 19.9, z: 1.6, label: [19.9, -4.35] },
+    lamp: { x: -19.6, z: 9.6 },
+  },
+  // the right hand plays: speeds stacked over a long pitch fader; a big volume dial behind the platter
+  studio: {
+    name: 'Studio', note: 'right hand',
+    start: { x: -18.6, z: 14.9 },
+    speeds: { at: [[20.3, 9.4], [20.3, 12.0], [20.3, 14.6]], led: [-1.95, 0], label: [20.3, 7.5] },
+    knob: { x: -18.2, z: -13.3, s: 1.2, led: [-14.7, -14.6], label: [-18.2, -16.2] },
+    fader: { x: 19.9, z: -.6, label: [19.9, -6.55] },
+    lamp: { x: -19.6, z: 9.6 },
+  },
+  // three controls and almost no print: a round start button, a rotary speed selector, a large dial
+  minimal: {
+    name: 'Minimal', note: 'three controls',
+    round: { x: -18.9, z: 14.5, led: [-16.7, 15.75] },
+    selector: { x: 19.7, z: 13.7 },
+    knob: { x: 19.7, z: 5.4, s: 1.3 },
+    lamp: { x: -19.6, z: 9.3 },
+  },
+};
 
 // ---------- generated textures ----------
 function dataTex(w, h, data, { srgb = false, repeat = false } = {}) {
@@ -250,8 +284,50 @@ const STUDIO_RIG = {
   key: new THREE.Color('#fff1df'), keyI: 1.9, keyPos: new THREE.Vector3(-48, 62, 30),
   rim: new THREE.Color('#dfe8ff'), rimI: .55, rimPos: new THREE.Vector3(40, 45, -50),
   box: new THREE.Color('#fff4e6'), boxI: 4.2, env: .9, flicker: 0,
+  sun: new THREE.Color('#ffd9a8'), sunI: 0, sunPos: new THREE.Vector3(-80, 60, 10),
 };
-const cloneRig = (r) => ({ ...r, key: r.key.clone(), keyPos: r.keyPos.clone(), rim: r.rim.clone(), rimPos: r.rimPos.clone(), box: r.box.clone() });
+const cloneRig = (r) => ({ ...r, key: r.key.clone(), keyPos: r.keyPos.clone(), rim: r.rim.clone(), rimPos: r.rimPos.clone(), box: r.box.clone(), sun: r.sun.clone(), sunPos: r.sunPos.clone() });
+
+// Cookies for a room's window light: what the sun passes through before it lands on the deck.
+// White lets light through, black blocks it; edges are blurred like a real penumbra.
+function goboTexture(kind) {
+  const S = 512, cv = document.createElement('canvas'); cv.width = cv.height = S;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#000'; g.fillRect(0, 0, S, S);
+  g.fillStyle = '#fff';
+  let seed = 11;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  if (kind === 'blinds') {                 // wooden blinds: even slats, a hair of the cord ladder
+    // the cookie is seen from the light, which stands to the deck's side: columns here land on the
+    // deck as bands running left to right, like the ones the blinds throw on the wall in the photo
+    g.filter = 'blur(3px)';
+    for (let x = 10; x < S; x += 44) g.fillRect(x, 0, 27, S);
+    g.fillStyle = '#000'; g.filter = 'blur(1px)';
+    for (const y of [S * .3, S * .72]) g.fillRect(0, y, S, 3);
+  } else if (kind === 'panes') {           // a deep window: four panes and a thick mullion
+    g.filter = 'blur(5px)';
+    const m = 22, w = (S - 3 * m) / 2;
+    for (const x of [m, 2 * m + w]) for (const y of [m, 2 * m + w]) g.fillRect(x, y, w, w);
+  } else if (kind === 'leaves') {          // an olive branch outside: sun with small leaf shadows
+    g.fillRect(0, 0, S, S);
+    g.fillStyle = '#000'; g.filter = 'blur(4px)';
+    // leaves hang in sprays along a few twigs, so they cluster instead of spreading evenly. The deck
+    // fills the middle ~40 % of the light's view: the sprays start there
+    for (let k = 0; k < 12; k++) {
+      let x = S * (.2 + .5 * rnd()), y = S * (.2 + .5 * rnd());
+      const dir = rnd() * Math.PI * 2;
+      g.lineWidth = 3; g.strokeStyle = '#000';
+      g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(dir) * 170, y + Math.sin(dir) * 170); g.stroke();
+      for (let i = 0; i < 16; i++) {
+        x += Math.cos(dir) * 11 + (rnd() - .5) * 30; y += Math.sin(dir) * 11 + (rnd() - .5) * 30;
+        g.beginPath(); g.ellipse(x, y, 16 + rnd() * 26, 6 + rnd() * 7, dir + (rnd() - .5) * 1.8, 0, Math.PI * 2); g.fill();
+      }
+    }
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
 
 // Warm, contrasty room used only for reflections: dark walls, a big softbox overhead,
 // a window strip on the left and a small lamp behind. Metals need this contrast to read as metal.
@@ -642,6 +718,19 @@ export class Turntable {
     this.lampLight = new THREE.SpotLight('#ffd2a1', 0, 70, .3, .8, 1.25);
     this.scene.add(this.lampLight, this.lampLight.target);
     this.rim = rim;
+    // a room's window light: a hard spot through a cookie (blinds, panes, leaves); off in most rooms
+    const sun = new THREE.SpotLight('#ffd9a8', 0, 0, .5, .2, 0);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(1024, 1024);
+    Object.assign(sun.shadow.camera, { near: 40, far: 260 });
+    sun.shadow.bias = -.0005;
+    sun.shadow.normalBias = .03;
+    sun.shadow.radius = 2;
+    sun.shadow.blurSamples = 8;
+    sun.visible = false;
+    this.scene.add(sun, sun.target);
+    this.sun = sun;
+    this.gobos = {};
     this.rig = cloneRig(STUDIO_RIG);
     this.rigTarget = cloneRig(STUDIO_RIG);
   }
@@ -651,14 +740,33 @@ export class Turntable {
     this.scene.environmentRotation.set(0, rotation, 0);
   }
 
-  // Light the deck like the room behind it. room: { id, img (url or null), light: { flicker } }
+  // Light the deck like the room behind it. room: { id, img (url or null), light }. The photo is read
+  // for the room's own light; `light` tunes what a picture cannot say: a fire's flicker (flicker), the
+  // colour of a lamp or tube (key, rim), how strong they and the soft fill are (keyI, rimI, boxI:
+  // multipliers), and a hard
+  // window light through blinds, panes or leaves (gobo, sun colour, sunI, sunAt [x, y, z]).
   setRoom(room) {
     this.roomId = room.id;
-    const flicker = room.light?.flicker || 0;
+    const L = room.light || {}, flicker = L.flicker || 0;
+    const tune = () => {
+      const t = this.rigTarget;
+      if (L.key) t.key.set(L.key);
+      if (L.rim) t.rim.set(L.rim);
+      if (L.keyI) t.keyI *= L.keyI;
+      if (L.rimI) t.rimI *= L.rimI;
+      if (L.boxI) t.boxI *= L.boxI;
+      t.sunI = L.gobo ? (L.sunI ?? 2.6) : 0;
+      if (L.gobo) {
+        t.sun.set(L.sun || '#ffd9a8');
+        t.sunPos.set(...(L.sunAt || [-80, 60, 10]));
+        this.sun.map = this.gobos[L.gobo] || (this.gobos[L.gobo] = goboTexture(L.gobo));
+      }
+    };
     if (!room.img) {
       this.roomEnv = null;
       if (this.studioEnv) this.useEnvironment(this.studioEnv, -1.1);
       Object.assign(this.rigTarget, cloneRig(STUDIO_RIG), { flicker });
+      tune();
       return;
     }
     const apply = ({ env, a }) => {
@@ -677,7 +785,9 @@ export class Turntable {
         boxI: Math.max(1.6, Math.min(5.2, 1.4 + 9 * a.brightness)),
         env: Math.max(.6, Math.min(.95, .5 + .7 * B)),
         flicker,
+        sun: this.rigTarget.sun, sunPos: this.rigTarget.sunPos,
       });
+      tune();
     };
     const cached = this.roomEnvs.get(room.id);
     if (cached) { apply(cached); return; }
@@ -694,9 +804,11 @@ export class Turntable {
   stepRig(dt, calm) {
     const r = this.rig, t = this.rigTarget, k = calm ? 1 : 1 - Math.exp(-2.6 * dt);
     let moved = 0;
-    for (const c of ['key', 'rim', 'box']) r[c].lerp(t[c], k);
-    for (const v of ['keyPos', 'rimPos']) { moved += r[v].distanceTo(t[v]); r[v].lerp(t[v], k); }
-    for (const n of ['keyI', 'rimI', 'boxI', 'env', 'flicker']) r[n] += (t[n] - r[n]) * k;
+    for (const c of ['key', 'rim', 'box', 'sun']) r[c].lerp(t[c], k);
+    for (const v of ['keyPos', 'rimPos', 'sunPos']) { moved += r[v].distanceTo(t[v]); r[v].lerp(t[v], k); }
+    for (const n of ['keyI', 'rimI', 'boxI', 'env', 'flicker', 'sunI']) r[n] += (t[n] - r[n]) * k;
+    const sunOn = r.sunI > .01;
+    if (sunOn !== this.sun.visible) { this.sun.visible = sunOn; this.shadowEpoch = (this.shadowEpoch || 0) + 1; }
     if (moved > .05) this.shadowEpoch = (this.shadowEpoch || 0) + 1;
     // fire never burns steady: three slow, incommensurate waves, a few percent deep
     const ts = performance.now() / 1000;
@@ -704,6 +816,7 @@ export class Turntable {
     this.key.color.copy(r.key); this.key.intensity = r.keyI * fl; this.key.position.copy(r.keyPos);
     this.rim.color.copy(r.rim); this.rim.intensity = r.rimI; this.rim.position.copy(r.rimPos);
     this.softbox.color.copy(r.box); this.softbox.intensity = r.boxI * (1 + (fl - 1) * .5);
+    this.sun.color.copy(r.sun); this.sun.intensity = r.sunI; this.sun.position.copy(r.sunPos);
     this.scene.environmentIntensity = r.env;
   }
 
@@ -989,96 +1102,174 @@ export class Turntable {
     return m;
   }
 
-  ledDome(x, z, y = TOP) {
+  ledDome(x, z, y = TOP, parent = this.deck) {
     const bezel = new THREE.Mesh(new THREE.CylinderGeometry(.27, .3, .08, 32), this.darkSatin);
-    bezel.position.set(x, y + .04, z); bezel.receiveShadow = true; this.deck.add(bezel);
+    bezel.position.set(x, y + .04, z); bezel.receiveShadow = true; parent.add(bezel);
     const mat = new THREE.MeshPhysicalMaterial({ color: '#2a140c', roughness: .12, clearcoat: 1, clearcoatRoughness: .05, emissive: '#000000' });
     const dome = new THREE.Mesh(new THREE.SphereGeometry(.2, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2), mat);
-    dome.scale.y = .6; dome.position.set(x, y + .08, z); this.deck.add(dome);
+    dome.scale.y = .6; dome.position.set(x, y + .08, z); parent.add(dome);
     return mat;
   }
 
   buildControls(add, darkSatin) {
-    const brushed = this.brushedMat;
     this.darkSatin = darkSatin;
     this.silkMats = []; this.engraveMats = [];
+    // shared by every layout: the brushed dial tops and the white index lines
+    this.dialTop = new THREE.MeshPhysicalMaterial({ metalness: 1, roughness: .2, color: '#e9e9ec', anisotropy: .9, anisotropyMap: circularAniso(256) });
+    this.metalMats.push(this.dialTop);
+    this.indexMat = new THREE.MeshStandardMaterial({ color: '#f1ede4', roughness: .5 });
+    this.buildLampOptics();
+    this.setLayout('classic');
+  }
+
+  // Swaps the control hardware for another layout. The platter, arm and lamp optics stay; the
+  // buttons, knobs, fader and lamp post are rebuilt where the layout puts them.
+  setLayout(id) {
+    const key = LAYOUTS[id] ? id : 'classic';
+    if (this.layoutId === key) return;
+    this.layoutId = key;
+    if (this.controls) {
+      const own = this.ctlMats;
+      this.deck.remove(this.controls);
+      this.controls.traverse((o) => o.geometry?.dispose());
+      for (const m of own) { m.map?.dispose(); m.dispose(); }
+      this.silkMats = this.silkMats.filter((m) => !own.has(m));
+      this.engraveMats = this.engraveMats.filter((m) => !own.has(m));
+    }
+    this.buildLayout(LAYOUTS[key]);
+    if (this.look) this.tintHardware(this.look);
+    this.shadowEpoch = (this.shadowEpoch || 0) + 1;
+  }
+
+  buildLayout(L) {
+    const G = this.controls = new THREE.Group();
+    this.deck.add(G);
+    const own = this.ctlMats = new Set();
+    const add = (mesh, parent = G) => { mesh.castShadow = true; mesh.receiveShadow = true; parent.add(mesh); return mesh; };
+    const darkSatin = this.darkSatin, brushed = this.brushedMat;
+    const decal = (text, w, h, opts, parent, pos, silk) => { const m = this.decal(text, w, h, opts, parent, pos, silk); own.add(m.material); return m; };
+    const silk = (text, w, x, z) => decal(text, w, w / 4.3, { px: 56, weight: 600, spacing: .3 }, G, [x, TOP + .005, z], true);
+    const led = (x, z) => { const m = this.ledDome(x, z, TOP, G); own.add(m); return m; };
+    // printed marks on the body share one ink
+    const ink = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: .6, transparent: true, polygonOffset: true, polygonOffsetFactor: -2 });
+    own.add(ink); this.silkMats.push(ink);
+    const mark = (w, h, x, z, rot = 0) => {
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), ink);
+      m.rotation.set(-Math.PI / 2, 0, rot); m.position.set(x, TOP + .006, z); G.add(m);
+    };
     this.pickables = [this.armGrab];
-    const button = (w, d, x, z, act, label) => {
-      const g = new THREE.Group();
-      g.position.set(x, TOP, z);
-      this.deck.add(g);
-      const well = add(new THREE.Mesh(new RoundedBoxGeometry(w + .45, .22, d + .45, 3, .1), darkSatin), g);
-      well.position.y = .05;
-      const cap = add(new THREE.Mesh(new RoundedBoxGeometry(w, .5, d, 5, .15), brushed), g);
-      cap.position.y = .4; cap.userData.act = act; cap.userData.rest = .4;
-      const long = label.length > 3, lw = long ? w * .82 : w * .62;
-      this.decal(label, lw, long ? lw / 4 : lw / 2, { px: long ? 54 : 120, weight: 600, spacing: long ? .22 : .08, h: long ? 128 : 256 }, cap, [0, .252, 0], false);
-      this.pickables.push(cap);
+    this.leds = {};
+    this.startBtn = this.speed33 = this.speed45 = this.speed78 = this.fader = this.selector = null;
+
+    // a press button: the cap is what moves, its rest height kept for the spring-back
+    const press = (g, cap, act, meshes) => {
+      cap.userData.rest = cap.position.y;
+      for (const m of meshes) { m.userData.act = act; this.pickables.push(m); }
       g.userData.cap = cap;
       return g;
     };
-    this.startBtn = button(5.2, 2.6, -18.6, 14.9, 'start', 'START · STOP');
-    this.speed33 = button(2.3, 1.3, 14.9, 15.6, '33', '33');
-    this.speed45 = button(2.3, 1.3, 17.7, 15.6, '45', '45');
-    this.speed78 = button(2.3, 1.3, 20.5, 15.6, '78', '78');
-    this.leds = {};
-    for (const [k, g] of [['33', this.speed33], ['45', this.speed45], ['78', this.speed78]]) this.leds[k] = this.ledDome(g.position.x, g.position.z - 1.4);
-    this.decal('SPEED', 3.2, .8, { px: 56, weight: 600, spacing: .3 }, this.deck, [17.7, TOP + .005, 13.55], true);
+    const button = (w, d, x, z, act, label) => {
+      const g = new THREE.Group();
+      g.position.set(x, TOP, z); G.add(g);
+      add(new THREE.Mesh(new RoundedBoxGeometry(w + .45, .22, d + .45, 3, .1), darkSatin), g).position.y = .05;
+      const cap = add(new THREE.Mesh(new RoundedBoxGeometry(w, .5, d, 5, .15), brushed), g);
+      cap.position.y = .4;
+      const long = label.length > 3, lw = long ? w * .82 : w * .62;
+      decal(label, lw, long ? lw / 4 : lw / 2, { px: long ? 54 : 120, weight: 600, spacing: long ? .22 : .08, h: long ? 128 : 256 }, cap, [0, .252, 0], false);
+      return press(g, cap, act, [cap]);
+    };
+    // round push button: polished skirt, circular-brushed face, engraved word
+    const roundButton = (r, x, z, act, label) => {
+      const g = new THREE.Group();
+      g.position.set(x, TOP, z); G.add(g);
+      add(new THREE.Mesh(new THREE.CylinderGeometry(r + .32, r + .36, .2, 96), darkSatin), g).position.y = .05;
+      const cap = new THREE.Group(); g.add(cap);
+      const side = add(new THREE.Mesh(new THREE.CylinderGeometry(r, r, .55, 96, 1, true), this.metalMat), cap);
+      side.position.y = .38;
+      const face = add(new THREE.Mesh(new THREE.CircleGeometry(r, 96), this.dialTop), cap);
+      face.rotation.x = -Math.PI / 2; face.position.y = .655;
+      const bevel = add(new THREE.Mesh(new THREE.TorusGeometry(r - .02, .04, 10, 96), this.metalMat), cap);
+      bevel.rotation.x = Math.PI / 2; bevel.position.y = .645;
+      decal(label, r * 1.25, r * .31, { px: 54, weight: 600, spacing: .26 }, cap, [0, .66, 0], false);
+      return press(g, cap, act, [side, face]);
+    };
+    // knurled dial with a brushed top and a white index line
+    const dial = (x, z, r, h, act, scale = 1) => {
+      const g = new THREE.Group();
+      g.position.set(x, TOP, z); g.scale.setScalar(scale); G.add(g);
+      add(new THREE.Mesh(new THREE.CylinderGeometry(r + .2, r + .25, .14, 96), darkSatin), g).position.y = .07;
+      const side = add(new THREE.Mesh(new THREE.CylinderGeometry(r, r + .05, h, 128, 1, true), this.knurledMat), g);
+      side.position.y = .1 + h / 2;
+      const top = add(new THREE.Mesh(new THREE.CircleGeometry(r, 128), this.dialTop), g);
+      top.rotation.x = -Math.PI / 2; top.position.y = .1 + h;
+      const index = add(new THREE.Mesh(new THREE.BoxGeometry(.1, .02, r * .48), this.indexMat), g);
+      index.position.set(0, .11 + h, -r * .6);
+      for (const m of [side, top]) { m.userData.act = act; this.pickables.push(m); }
+      return g;
+    };
 
-    // volume knob: knurled skirt, brushed circular top, white index; its sweep runs from 7 to 5 o'clock
-    const kg = new THREE.Group();
-    kg.position.set(19.9, TOP, 10.4);
-    this.deck.add(kg);
-    add(new THREE.Mesh(new THREE.CylinderGeometry(1.55, 1.6, .14, 96), darkSatin), kg).position.y = .07;
-    const kside = add(new THREE.Mesh(new THREE.CylinderGeometry(1.35, 1.4, 1.1, 128, 1, true), this.knurledMat), kg);
-    kside.position.y = .65;
-    const ktopMat = new THREE.MeshPhysicalMaterial({ metalness: 1, roughness: .2, color: '#e9e9ec', anisotropy: .9, anisotropyMap: circularAniso(256) });
-    this.metalMats.push(ktopMat);
-    const ktop = add(new THREE.Mesh(new THREE.CircleGeometry(1.35, 128), ktopMat), kg);
-    ktop.rotation.x = -Math.PI / 2; ktop.position.y = 1.2;
-    const index = add(new THREE.Mesh(new THREE.BoxGeometry(.1, .02, .65), new THREE.MeshStandardMaterial({ color: '#f1ede4', roughness: .5 })), kg);
-    index.position.set(0, 1.21, -.8);
-    this.knob = kg;
-    for (const m of [kside, ktop]) { m.userData.act = 'volume'; this.pickables.push(m); }
-    // printed scale around it: eleven ticks, the last one longer
-    for (let i = 0; i <= 10; i++) {
-      const th = KNOB_MIN - i / 10 * (KNOB_MIN - KNOB_MAX), r = 1.88;
-      const tick = new THREE.Mesh(new THREE.PlaneGeometry(.07, i === 10 ? .42 : .26), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: .6, transparent: true, polygonOffset: true, polygonOffsetFactor: -2 }));
-      tick.rotation.set(-Math.PI / 2, 0, th);
-      tick.position.set(19.9 - r * Math.sin(th), TOP + .006, 10.4 - r * Math.cos(th));
-      this.deck.add(tick); this.silkMats.push(tick.material);
+    // start / stop
+    if (L.start) this.startBtn = button(5.2, 2.6, L.start.x, L.start.z, 'start', 'START · STOP');
+    if (L.round) {
+      this.startBtn = roundButton(1.25, L.round.x, L.round.z, 'start', 'START');
+      this.leds.power = led(...L.round.led);
     }
-    this.leds.power = this.ledDome(17.15, 10.4);
-    this.decal('VOLUME', 2.8, .65, { px: 56, weight: 600, spacing: .3 }, this.deck, [19.9, TOP + .005, 12.75], true);
 
-    // pitch fader: slot, printed scale, brushed cap with a centre line, zero LED
-    const slot = add(new THREE.Mesh(new RoundedBoxGeometry(.7, .2, 10, 2, .1), new THREE.MeshStandardMaterial({ color: '#050505', roughness: .9 })));
-    slot.position.set(19.9, TOP + .02, 1.6);
-    for (let i = -4; i <= 4; i++) {
-      const tick = new THREE.Mesh(new THREE.PlaneGeometry(i === 0 ? .9 : .5, .07), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: .6, transparent: true, polygonOffset: true, polygonOffsetFactor: -2 }));
-      tick.rotation.x = -Math.PI / 2; tick.position.set(18.75 - (i === 0 ? .2 : 0), TOP + .006, 1.6 + i * 1.1);
-      this.deck.add(tick); this.silkMats.push(tick.material);
+    // speed: three buttons with a lamp each, or one rotary selector with printed detents
+    if (L.speeds) {
+      const S = L.speeds;
+      [this.speed33, this.speed45, this.speed78] = ['33', '45', '78'].map((k, i) => button(2.3, 1.3, S.at[i][0], S.at[i][1], k, k));
+      for (const [k, g] of [['33', this.speed33], ['45', this.speed45], ['78', this.speed78]]) this.leds[k] = led(g.position.x + S.led[0], g.position.z + S.led[1]);
+      silk('SPEED', 3.2, ...S.label);
     }
-    this.decal('PITCH', 2.6, .65, { px: 56, weight: 600, spacing: .3 }, this.deck, [19.9, TOP + .005, -4.35], true);
-    const fader = add(new THREE.Mesh(new RoundedBoxGeometry(1.9, .9, 1.25, 4, .2), brushed));
-    fader.position.set(19.9, TOP + .55, 1.6);
-    const groove = new THREE.Mesh(new THREE.BoxGeometry(1.7, .02, .07), darkSatin);
-    groove.position.y = .455; fader.add(groove);
-    fader.userData.act = 'pitch';
-    this.pickables.push(fader);
-    this.fader = fader;
-    this.leds.zero = this.ledDome(21.25, 1.6);
+    if (L.selector) {
+      const s = L.selector;
+      this.selector = dial(s.x, s.z, 1.05, .8, 'speed');
+      for (const [k, th] of Object.entries(SELECTOR)) {
+        mark(.07, .3, s.x - 1.5 * Math.sin(th), s.z - 1.5 * Math.cos(th), th);
+        decal(k, .82, .41, { px: 120, weight: 600, spacing: .08, h: 256 }, G, [s.x - 2.05 * Math.sin(th), TOP + .005, s.z - 2.05 * Math.cos(th)], true);
+      }
+    }
 
-    // stylus lamp: a pop-up post at the front left with a small hooded head. It rakes a warm,
-    // V-shaped pool across the grooves toward the needle and throws the arm's shadow away from it.
-    const LAMP = { x: -19.6, z: 9.6 };
+    // volume: its sweep runs from 7 to 5 o'clock, the printed scale ends in a longer tick
+    const k = L.knob;
+    this.knob = dial(k.x, k.z, 1.35, 1.1, 'volume', k.s);
+    if (k.label) {
+      const r = 1.88 * k.s;
+      for (let i = 0; i <= 10; i++) {
+        const th = KNOB_MIN - i / 10 * (KNOB_MIN - KNOB_MAX);
+        mark(.07, i === 10 ? .42 : .26, k.x - r * Math.sin(th), k.z - r * Math.cos(th), th);
+      }
+      silk('VOLUME', 2.8, ...k.label);
+    }
+    if (k.led) this.leds.power = led(...k.led);
+
+    // pitch fader: slot, printed scale, brushed cap with a centre line, zero lamp
+    if (L.fader) {
+      const f = L.fader;
+      this.faderZ = f.z;
+      add(new THREE.Mesh(new RoundedBoxGeometry(.7, .2, 10, 2, .1), darkSatin)).position.set(f.x, TOP + .02, f.z);
+      for (let i = -4; i <= 4; i++) mark(i === 0 ? .9 : .5, .07, f.x - 1.15 - (i === 0 ? .2 : 0), f.z + i * 1.1);
+      silk('PITCH', 2.6, ...f.label);
+      const fader = add(new THREE.Mesh(new RoundedBoxGeometry(1.9, .9, 1.25, 4, .2), brushed));
+      fader.position.set(f.x, TOP + .55, f.z);
+      const groove = new THREE.Mesh(new THREE.BoxGeometry(1.7, .02, .07), darkSatin);
+      groove.position.y = .455; fader.add(groove);
+      fader.userData.act = 'pitch';
+      this.pickables.push(fader);
+      this.fader = fader;
+      this.leds.zero = led(f.x + 1.35, f.z);
+    } else this.pitch = 0;
+
+    // stylus lamp: a pop-up post with a small hooded head
+    const LAMP = L.lamp;
     const collar = add(new THREE.Mesh(new THREE.CylinderGeometry(.62, .62, .5, 48, 1, true), this.knurledMat));
     collar.position.set(LAMP.x, TOP + .25, LAMP.z);
     const collarTop = add(new THREE.Mesh(new THREE.RingGeometry(.36, .62, 48).rotateX(-Math.PI / 2), this.metalMat));
     collarTop.position.set(LAMP.x, TOP + .5, LAMP.z);
     const post = new THREE.Group();
     post.position.set(LAMP.x, TOP, LAMP.z);
-    this.deck.add(post);
+    G.add(post);
     this.lampPost = post;
     add(new THREE.Mesh(new THREE.CylinderGeometry(.3, .34, 6.4, 32), this.metalMat), post).position.y = 3.2;
     const head = new THREE.Group();
@@ -1093,6 +1284,7 @@ export class Turntable {
     const bezel = add(new THREE.Mesh(new THREE.TorusGeometry(.58, .06, 12, 48), this.metalMat), head);
     bezel.position.z = 1.3;
     const bulbMat = new THREE.MeshPhysicalMaterial({ color: '#2a2420', roughness: .08, clearcoat: 1, emissive: '#ffd2a1', emissiveIntensity: 0 });
+    own.add(bulbMat);
     const lens = new THREE.Mesh(new THREE.CircleGeometry(.54, 48), bulbMat);
     lens.position.z = 1.28;
     head.add(lens);
@@ -1101,7 +1293,10 @@ export class Turntable {
     for (const m of [collar, shell, lens, cap]) { m.userData.act = 'lamp'; this.pickables.push(m); }
     // the lamp sits at the light's origin: its own parts must not shadow the beam
     post.traverse((o) => { o.castShadow = false; });
+  }
 
+  // the lamp's light, its visible beam and the dust in it; built once, they follow the lamp head
+  buildLampOptics() {
     this.lampLight.castShadow = true;
     this.lampLight.shadow.mapSize.set(1024, 1024);
     Object.assign(this.lampLight.shadow.camera, { near: .5, far: 70 });
@@ -1225,16 +1420,8 @@ export class Turntable {
     mat.clearcoatRoughness = b.clearcoatRoughness ?? .2;
     mat.anisotropy = b.brushed ? .7 : 0;
     mat.needsUpdate = true;
-    const metal = METALS[m.metal] || METALS.silver;
-    for (const mm of this.metalMats) {
-      mm.color.set(metal.color);
-      mm.roughness = mm.userData.brushed ? .55 : mm.userData.rough ?? metal.roughness;
-    }
-    // engraved labels on the hardware and silkscreen on the body pick an ink that reads on them
-    const darkMetal = m.metal === 'black' || m.metal === 'gunmetal';
-    for (const em of this.engraveMats) { em.color.set(darkMetal ? '#e9e5dd' : '#2a2622'); em.opacity = darkMetal ? .8 : .7; }
-    for (const sm of this.silkMats) { sm.color.set(b.light ? '#2a2622' : '#ece7dd'); sm.opacity = b.light ? .65 : .7; }
-    this.cartAccent.color.set(m.metal === 'brass' ? '#d6b06a' : '#c9a45c');
+    this.look = m;
+    this.tintHardware(m);
     // clear-coated bodies carry fine swirl marks, visible only in the highlights
     mat.clearcoatRoughnessMap = mat.clearcoat > 0 ? (this.scratches || (this.scratches = scratchMap())) : null;
     this.matMat.map = m.mat === 'rubber' ? null : this.tex(m.mat);
@@ -1245,6 +1432,21 @@ export class Turntable {
     this.matMat.needsUpdate = true;
     this.led = new THREE.Color(m.led);
     this.applyVinyl(vinyl);
+  }
+
+  // metal finish of the hardware, and an ink for the engraving and silkscreen that reads on it
+  tintHardware(m) {
+    const b = m.body;
+    const metal = METALS[m.metal] || METALS.silver;
+    for (const mm of this.metalMats) {
+      mm.color.set(metal.color);
+      mm.roughness = mm.userData.brushed ? .55 : mm.userData.rough ?? metal.roughness;
+    }
+    // engraved labels on the hardware and silkscreen on the body pick an ink that reads on them
+    const darkMetal = m.metal === 'black' || m.metal === 'gunmetal';
+    for (const em of this.engraveMats) { em.color.set(darkMetal ? '#e9e5dd' : '#2a2622'); em.opacity = darkMetal ? .8 : .7; }
+    for (const sm of this.silkMats) { sm.color.set(b.light ? '#2a2622' : '#ece7dd'); sm.opacity = b.light ? .65 : .7; }
+    this.cartAccent.color.set(m.metal === 'brass' ? '#d6b06a' : '#c9a45c');
   }
 
   applyVinyl(v) {
@@ -1347,7 +1549,11 @@ export class Turntable {
         this.pressAnim(act);
         if (act === 'start') this.onStartStop?.();
         else if (act === 'lamp') this.lamp = !this.lamp;
-        else { this.setSpeed(+act); this.onSpeed?.(+act); }
+        else {
+          // the rotary selector steps to the next detent; a speed button names its own
+          const rpm = act === 'speed' ? { 33: 45, 45: 78, 78: 33 }[this.speedSetting] : +act;
+          this.setSpeed(rpm); this.onSpeed?.(rpm);
+        }
       }
     });
     // the wheel over the knob turns it (and does not reach the focus-mode zoom)
@@ -1441,9 +1647,9 @@ export class Turntable {
     // Shadows are redrawn per light. The key light's large map follows shadowsDirty() (casters that
     // actually moved). The stylus lamp sits low and close, so its long shadow of the arm magnifies the
     // arm's slow tracking and its once-per-turn sway: its small map is redrawn every frame the arm moves.
-    const key = this.key.shadow, lamp = this.lampLight.shadow;
-    key.autoUpdate = lamp.autoUpdate = false;
-    if (this.shadowsDirty()) key.needsUpdate = lamp.needsUpdate = true;
+    const key = this.key.shadow, lamp = this.lampLight.shadow, sun = this.sun.shadow;
+    key.autoUpdate = lamp.autoUpdate = sun.autoUpdate = false;
+    if (this.shadowsDirty()) key.needsUpdate = lamp.needsUpdate = sun.needsUpdate = true;
     const arm = [this.armYaw.rotation.y, this.armPitch.rotation.z, this.lampLight.target.position.x, this.lampLight.target.position.z, this.lampLight.position.y];
     if (this.lampLevel > .003 && (!this.armSig || arm.some((v, i) => Math.abs(v - this.armSig[i]) > 1e-7))) lamp.needsUpdate = true;
     this.armSig = arm;
@@ -1455,7 +1661,7 @@ export class Turntable {
   // The platter and record spin about their own axis, so their shadows do not change while playing.
   shadowsDirty() {
     const cap = this.pressing ? this.pressing.cap.position.y : 0;
-    const now = [this.armAngle, this.lift * 40, this.lidOpen * 60, this.recordGroup.position.y * 4, this.lampUp * 40, this.knob.rotation.y * 20, this.fader.position.z * 4, cap * 10, (this.lampAim?.x || 0) * 4, (this.lampAim?.z || 0) * 4, this.shadowEpoch || 0];
+    const now = [this.armAngle, this.lift * 40, this.lidOpen * 60, this.recordGroup.position.y * 4, this.lampUp * 40, this.knob.rotation.y * 20, (this.fader?.position.z ?? 0) * 4, (this.selector?.rotation.y ?? 0) * 20, cap * 10, (this.lampAim?.x || 0) * 4, (this.lampAim?.z || 0) * 4, this.shadowEpoch || 0];
     const last = this.shadowSig;
     if (last && now.every((v, i) => Math.abs(v - last[i]) < .02)) return false;
     this.shadowSig = now;
@@ -1635,6 +1841,7 @@ export class Turntable {
     this.strobeLight.intensity = this.strobeLevel * 6;
     this.ledLevel = this.ledLevel || {};
     const setLed = (k, on, color = led) => {
+      if (!this.leds[k]) return;
       this.ledLevel[k] = approach(this.ledLevel[k] || 0, on ? 1 : 0, 10, dt);
       this.leds[k].emissive.copy(color);
       this.leds[k].emissiveIntensity = this.ledLevel[k] * 3.2;
@@ -1645,7 +1852,8 @@ export class Turntable {
 
     // knob, fader and lid move on critically damped springs
     this.knob.rotation.y = spring('knobVel', this.knob.rotation.y, KNOB_MIN + this.volume * (KNOB_MAX - KNOB_MIN), 90);
-    this.fader.position.z = spring('faderVel', this.fader.position.z, 1.6 + this.pitch / 8 * 4.4, 220);
+    if (this.fader) this.fader.position.z = spring('faderVel', this.fader.position.z, this.faderZ + this.pitch / 8 * 4.4, 220);
+    if (this.selector) this.selector.rotation.y = spring('selVel', this.selector.rotation.y, SELECTOR[this.speedSetting], 160);
     this.lidOpen = Math.max(0, Math.min(1, spring('lidVel', this.lidOpen, this.lidClosed ? 0 : 1, 9)));
     this.lid.rotation.x = -this.lidOpen * 1.45;
     const fade = 1 - smooth(Math.max(0, (this.lidOpen - .55) / .45));
@@ -1673,7 +1881,7 @@ export class Turntable {
     }
 
     // full frame rate while anything moves faster than the camera drift; see loop()
-    const moving = [this.armAngle, this.lift, this.lidOpen, this.knob.rotation.y, this.fader.position.z, this.lampUp, this.lampLevel, this.zoom, this.showcase, this.pointer.x, this.pointer.y];
+    const moving = [this.armAngle, this.lift, this.lidOpen, this.knob.rotation.y, this.fader?.position.z ?? 0, this.selector?.rotation.y ?? 0, this.lampUp, this.lampLevel, this.zoom, this.showcase, this.pointer.x, this.pointer.y];
     const prev = this.movingPrev;
     this.movingPrev = moving;
     this.busy = this.platterVel > .3 || !!this.recordSwap || !!this.regionAnim || !!this.pressing || !!this.dragArm || !!this.dragPitch || !!this.dragVol

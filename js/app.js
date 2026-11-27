@@ -1,4 +1,4 @@
-import { Turntable } from './deck3d.js';
+import { Turntable, LAYOUTS } from './deck3d.js';
 import { MATERIALS, VINYLS, ROOMS, METALS, asset } from './materials.js';
 import { SpotifySource } from './sources/spotify.js';
 import { YouTubeSource, parseYouTube, searchYouTube } from './sources/youtube.js';
@@ -12,7 +12,7 @@ const body = document.body;
 const PREFS_KEY = 'vinyl.prefs.v2';
 const prefs = Object.assign({
   material: 'walnut', vinyl: 'black', room: 'cream', lyrics: true, lid: false, focus: false, focusLyrics: false,
-  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver', volume: .8, ytPanel: false, ytGhost: false,
+  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver', layout: 'classic', volume: .8, ytPanel: false, ytGhost: false,
 }, (() => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; } })());
 const save = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* private mode */ } };
 // rooms renamed when the photographed set replaced the first backdrops
@@ -105,6 +105,8 @@ function applyLook() {
   const m = MATERIALS.find((x) => x.id === prefs.material) || MATERIALS[0];
   const v = VINYLS.find((x) => x.id === prefs.vinyl) || VINYLS[0];
   tt.applyMaterial({ ...m, metal: prefs.metal }, v);
+  tt.setLayout(prefs.layout);
+  document.querySelectorAll('.layout-card').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.id === tt.layoutId)));
   document.querySelectorAll('.metal-chip').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.id === prefs.metal)));
   document.querySelectorAll('.mat-card').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.id === m.id)));
   document.querySelectorAll('.vinyl-chip:not(.metal-chip)').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.id === v.id)));
@@ -564,6 +566,30 @@ function buildSheets() {
     b.addEventListener('click', () => { prefs.material = m.id; save(); applyLook(); });
     $('#materials').append(b);
   }
+  // control layouts, each drawn as a small top view of the plinth (numbers only, from deck3d.js)
+  const sketch = (L) => {
+    const r = (x, z, w, d) => `<rect x="${x - w / 2}" y="${z - d / 2}" width="${w}" height="${d}" rx=".5"/>`;
+    const c = (x, z, rad, cls = '') => `<circle${cls && ` class="${cls}"`} cx="${x}" cy="${z}" r="${rad}"/>`;
+    const parts = [];
+    if (L.start) parts.push(r(L.start.x, L.start.z, 5.2, 2.6));
+    if (L.round) parts.push(c(L.round.x, L.round.z, 1.4));
+    for (const [x, z] of L.speeds?.at || []) parts.push(r(x, z, 2.3, 1.3));
+    if (L.selector) parts.push(c(L.selector.x, L.selector.z, 1.25));
+    parts.push(c(L.knob.x, L.knob.z, 1.55 * L.knob.s));
+    if (L.fader) parts.push(r(L.fader.x, L.fader.z, .8, 10));
+    parts.push(c(L.lamp.x, L.lamp.z, .75));
+    return `<svg viewBox="-24 -19 48 38" aria-hidden="true"><rect class="pl" x="-22.5" y="-17.5" width="45" height="35" rx="1.6"/>`
+      + `${c(-5, 0, 15.6, 'pt')}${c(-5, 0, 5, 'pt')}${c(13.6, -11.2, 2.6, 'arm')}<path class="arm" d="M13.6 -11.2 L13.6 10"/><g class="ctl">${parts.join('')}</g></svg>`;
+  };
+  for (const [id, L] of Object.entries(LAYOUTS)) {
+    const b = document.createElement('button');
+    b.className = 'layout-card'; b.dataset.id = id; b.setAttribute('role', 'radio');
+    b.innerHTML = `${sketch(L)}<b></b><small></small>`;
+    b.querySelector('b').textContent = L.name;
+    b.querySelector('small').textContent = L.note;
+    b.addEventListener('click', () => { prefs.layout = id; save(); applyLook(); });
+    $('#layouts').append(b);
+  }
   for (const v of VINYLS) {
     const b = document.createElement('button');
     b.className = 'vinyl-chip'; b.dataset.id = v.id; b.setAttribute('role', 'radio');
@@ -583,7 +609,7 @@ function buildSheets() {
   for (const r of ROOMS) {
     const b = document.createElement('button');
     b.className = `room-card${r.img ? '' : ' plain'}`; b.dataset.id = r.id; b.setAttribute('role', 'radio');
-    if (r.img) b.style.backgroundImage = `url("${asset(r.img)}")`;
+    if (r.img) b.style.backgroundImage = `url("${asset(`${r.img}-thumb`)}")`;
     const s = document.createElement('span'); s.textContent = r.name; b.append(s);
     b.addEventListener('click', () => { prefs.room = r.id; save(); applyRoom(); });
     $('#rooms').append(b);

@@ -39,15 +39,27 @@ export const METALS = {
   gunmetal: { name: 'Gunmetal', color: '#6a6d72', roughness: .26 },
 };
 
-// Room backdrops. tone sets the interface text color over them.
+// Room backdrops. tone sets the interface text color over them. light tunes the deck's lighting on top
+// of what the photo itself says (see Turntable.setRoom): a lamp's or tube's colour, a fire's flicker,
+// and a hard window light through blinds, panes or leaves. sunAt is where that sun stands, in cm from
+// the deck (x right, y up, z toward the viewer).
 export const ROOMS = [
   { id: 'cream', name: 'Plain', tone: 'light', img: null },
-  { id: 'morning', name: 'Morning', tone: 'light', img: 'room-morning' },
+  { id: 'morning', name: 'Morning', tone: 'light', img: 'room-morning', light: { gobo: 'panes', sun: '#ffe6c2', sunI: 2.2, sunAt: [-75, 62, -15], keyI: .8, boxI: .85 } },
   { id: 'japandi', name: 'Japandi', tone: 'light', img: 'room-japandi' },
-  { id: 'sunroom', name: 'Sunroom', tone: 'light', img: 'room-sunroom' },
+  { id: 'sunroom', name: 'Sunroom', tone: 'light', img: 'room-sunroom', light: { gobo: 'leaves', sun: '#fff0d4', sunI: 3.4, sunAt: [-70, 80, -25], keyI: .6, boxI: .7 } },
+  { id: 'coast', name: 'Coast', tone: 'light', img: 'room-coast', light: { gobo: 'leaves', sun: '#fff3dc', sunI: 4.4, sunAt: [-60, 95, -20], keyI: .5, boxI: .6 } },
+  { id: 'snow', name: 'Snow cabin', tone: 'light', img: 'room-snow', light: { key: '#e2eaff', rim: '#ffc48a', rimI: 1.3 } },
+  { id: 'loft', name: 'Loft', tone: 'dark', img: 'room-loft', light: { key: '#eef1f6' } },
+  { id: 'concrete', name: 'Concrete', tone: 'dark', img: 'room-concrete', light: { key: '#f2f3f4', keyI: 1.1 } },
+  { id: 'seventies', name: 'Seventies', tone: 'dark', img: 'room-seventies', light: { gobo: 'blinds', sun: '#ffad62', sunI: 4.6, sunAt: [-65, 70, -20], keyI: .5, boxI: .7 } },
+  { id: 'desert', name: 'Desert', tone: 'dark', img: 'room-desert', light: { gobo: 'panes', sun: '#ff9d5c', sunI: 4.2, sunAt: [-70, 62, -10], keyI: .55, boxI: .75 } },
   { id: 'rain', name: 'Rain', tone: 'dark', img: 'room-rain' },
   { id: 'reading', name: 'Reading nook', tone: 'dark', img: 'room-reading' },
+  { id: 'library', name: 'Library', tone: 'dark', img: 'room-library', light: { key: '#ffd79c', rim: '#a9d9a4', keyI: .8, boxI: .7, rimI: .9 } },
   { id: 'listening', name: 'Listening room', tone: 'dark', img: 'room-listening' },
+  { id: 'bar', name: 'Late bar', tone: 'dark', img: 'room-bar', light: { key: '#ffb866', keyI: .6, boxI: .55, rimI: 1.6 } },
   { id: 'fireplace', name: 'Fireplace', tone: 'dark', img: 'room-fireplace', light: { flicker: 1 } },
   { id: 'city', name: 'City night', tone: 'dark', img: 'room-city' },
+  { id: 'neon', name: 'Neon', tone: 'dark', img: 'room-neon', light: { key: '#ff4fd2', rim: '#3fdcff', keyI: .9, rimI: 1.7 } },
 ];

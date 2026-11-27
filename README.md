@@ -28,16 +28,17 @@ I wanted the feeling of a record player in the room while music plays from a str
 
 **Lit by the room it is in**
 
-Each room photo also lights the deck. The photo becomes the reflection environment, and the light rig reads where the photo's window, lamp or fire is, plus its colour and brightness. In a sunny room the chrome catches the window; by the fireplace the wood glows amber and the light flickers.
+Each room photo also lights the deck. The photo becomes the reflection environment, and the light rig reads where the photo's window, lamp or fire is, plus its colour and brightness. In a sunny room the chrome catches the window; by the fireplace the wood glows amber and the light flickers. Some rooms add what a photo cannot say: low sun through wooden blinds lays stripes across the deck in the seventies room, olive leaves throw small shadows on the coast, and the neon room lights it magenta from one side and cyan from the other.
 
 <img src="docs/customize.webp" alt="The turntable settings open on the left while the deck turns toward the viewer in a japandi room" width="100%">
 
-**Bodies, pressings, rooms**
+**Bodies, layouts, pressings, rooms**
 
 - 10 bodies: dark walnut, wenge, smoked oak, rosewood, natural oak, cream lacquer, forest lacquer, satin black, brushed aluminium, Nero marble.
+- 3 control layouts: classic (speed buttons in a front row), studio (speeds and a long pitch fader under the right hand, a big volume dial behind the platter) and minimal (a round start button, a rotary speed selector and one large dial).
 - 4 hardware finishes, set separately from the body: silver, black, brass, gunmetal.
 - 9 pressings: black, smoke, oxblood, amber, cream, marble, splatter, cover-coloured, picture disc.
-- 9 rooms: plain, morning, japandi, sunroom, rain, reading nook, listening room, fireplace, city night.
+- 18 rooms: plain, morning, japandi, sunroom, coast, snow cabin, loft, concrete, seventies, desert, rain, reading nook, library, listening room, late bar, fireplace, city night, neon.
 
 Settings open beside the deck, not over it, so you see every change as you make it.
 
