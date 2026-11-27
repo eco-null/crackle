@@ -471,6 +471,7 @@ function setFocus(on) {
   prefs.focus = on; save();
   body.classList.toggle('focus', on);
   setToggle('#b-focus', on);
+  tt.zoomAim = on;
   if (!on) tt.setZoom(1);
   if (on && prefs.focusLyrics) setFocusLyrics(false);   // focus starts with the record alone
   syncLyricsBox();

@@ -1405,7 +1405,8 @@ export class Turntable {
     // opening shot: a slow dolly in from a little higher and wider
     const e = easeOutCubic(this.intro ?? 1), introK = 1 - e;
     // zooming in drifts the aim from the deck's centre to the record and needle, and lowers the eye
-    const zk = smooth(Math.max(0, Math.min(1, (this.zoom - 1) / 1.6))), sc = this.showcase;
+    // focus mode zooms toward the record and needle; elsewhere zoom goes straight in and keeps the framing
+    const zk = this.zoomAim ? smooth(Math.max(0, Math.min(1, (this.zoom - 1) / 1.6))) : 0, sc = this.showcase;
     const el = (52 + introK * 7 + this.pointer.y * -3 + this.drift.y - zk * 9 - sc * 5) * Math.PI / 180;
     const az = (11 + introK * 7 + this.pointer.x * 5 + this.drift.x + sc * 13) * Math.PI / 180;
     const st = stylusAt(this.armAngle);
