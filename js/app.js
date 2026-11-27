@@ -453,7 +453,8 @@ $('#q').addEventListener('blur', () => setTimeout(closeResults, 120));
 let idleTimer, idleZoom = null;
 function wake() {
   // the idle layout gives the deck more room (see css), so its framing follows the class
-  if (body.classList.contains('idle')) { requestAnimationFrame(() => placeDeck()); if (idleZoom != null) { tt.setZoom(idleZoom); idleZoom = null; } }
+  // waking takes back only the idle view's small grow, so a zoom made while idle is kept
+  if (body.classList.contains('idle')) { requestAnimationFrame(() => placeDeck()); if (idleZoom != null) { tt.setZoom(tt.zoomTarget / 1.08); idleZoom = null; } }
   body.classList.remove('idle');
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
@@ -738,7 +739,6 @@ function showZoom() {
 }
 $('#deck').addEventListener('wheel', (e) => {
   e.preventDefault();
-  wake();                                   // first: waking hands back the zoom the idle view borrowed
   const step = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
   tt.setZoom(tt.zoomTarget * Math.exp(-step * (e.ctrlKey ? .01 : .0016)));
   showZoom();
@@ -747,7 +747,19 @@ $('#deck').addEventListener('dblclick', () => { if (tt.zoomTarget !== 1) { tt.se
 $('#b-lyrics').addEventListener('click', () => setLyricsOn(!prefs.lyrics));
 $('#b-lid').addEventListener('click', () => setLid(!prefs.lid));
 $('#b-full').addEventListener('click', toggleFullscreen);
-for (const ev of ['pointermove', 'pointerdown', 'wheel', 'touchstart']) window.addEventListener(ev, wake, { passive: true });
+// What brings the controls back: a click, a touch, a key, or a deliberate mouse movement. While the
+// idle layout shows, the wheel only zooms and small drifts of the hand are ignored.
+let travel = 0, travelAt = 0;
+window.addEventListener('pointermove', (e) => {
+  if (!body.classList.contains('idle')) { wake(); return; }
+  const now = performance.now();
+  if (now - travelAt > 600) travel = 0;          // slow drift spread over time does not add up
+  travelAt = now;
+  travel += Math.hypot(e.movementX || 0, e.movementY || 0);
+  if (travel > 220) { travel = 0; wake(); }
+}, { passive: true });
+for (const ev of ['pointerdown', 'touchstart']) window.addEventListener(ev, wake, { passive: true });
+window.addEventListener('wheel', () => { if (!body.classList.contains('idle')) wake(); }, { passive: true });
 
 window.addEventListener('keydown', (e) => {
   const typing = e.target.matches?.('input, textarea');
