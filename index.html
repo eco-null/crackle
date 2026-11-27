@@ -113,6 +113,11 @@
     <section class="src">
       <div class="src-head"><svg><use href="#i-spotify"/></svg><h3>Spotify</h3><span class="badge mono" id="sp-badge">not connected</span></div>
       <div id="sp-setup">
+        <div id="sp-simple" hidden>
+          <p class="hint">Without an account, search plays 30-second previews. Log in for full songs, or to let the turntable follow what your Spotify app plays.</p>
+          <button class="btn primary" id="sp-login2" type="button">Log in with Spotify</button>
+        </div>
+        <div id="sp-dev">
         <p class="hint">Without an account, search plays 30-second previews. For full songs, Spotify needs a free app ID once:</p>
         <ol class="steps">
           <li>Open <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">developer.spotify.com/dashboard</a> and create an app.</li>
@@ -123,6 +128,7 @@
           <input class="input mono" id="sp-client" placeholder="Client ID" autocomplete="off" spellcheck="false" maxlength="32" aria-label="Spotify client ID">
           <button class="btn primary" type="submit">Log in with Spotify</button>
         </form>
+        </div>
       </div>
       <div id="sp-connected" hidden>
         <p class="hint" id="sp-hint">Play from any Spotify app and the turntable follows.</p>

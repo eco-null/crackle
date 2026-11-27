@@ -38,6 +38,8 @@ export class SpotifySource {
   get clientId() { return store.get(K.client) || SPOTIFY_CLIENT_ID || ''; }
   set clientId(v) { store.set(K.client, (v || '').trim()); }
   get connected() { return !!store.get(K.tok); }
+  // the site ships with its own client ID: visitors only see a login button, never app setup
+  get builtIn() { return /^[0-9a-f]{32}$/i.test(SPOTIFY_CLIENT_ID); }
   get redirectUri() { return redirectUri(); }
 
   async login() {
@@ -168,7 +170,7 @@ export class SpotifySource {
 
   resetSdk() {
     this.player?.disconnect();
-    Object.assign(this, { player: null, sdkPromise: null, sdkFailed: false, sdkError: null, deviceId: null, authRetried: false });
+    Object.assign(this, { player: null, sdkPromise: null, sdkFailed: false, sdkError: null, sdkReason: null, deviceId: null, authRetried: false });
   }
 
   start() {
@@ -204,10 +206,9 @@ export class SpotifySource {
         : 'This browser cannot play protected audio (DRM/Widevine), so Spotify cannot play here. In Brave, enable Widevine in Settings → Extensions. Chrome and Edge work out of the box.';
     }
     if (this.sdkError === 'premium') return 'Playing inside the browser needs Spotify Premium.';
-    if (this.sdkError === 'auth') {
-      return 'Spotify refused the in-browser player for this app. In the Spotify developer dashboard, open the app → Settings → APIs used, tick "Web Playback SDK", save, then log out and back in here. In Zen or Firefox with strict tracking protection, turn it off for this site from the shield in the address bar.';
-    }
-    if (this.sdkError) return `The Spotify player could not start here (${this.sdkError}).`;
+    if (this.sdkReason === 'blocked') return 'Something in this browser is blocking Spotify’s player, usually tracking protection or an ad blocker. Allow this site in it, then reload.';
+    if (this.sdkReason === 'account') return 'Spotify does not allow playing inside the browser for this account.';
+    if (this.sdkError) return 'Spotify could not start its player in this browser. Chrome and Edge usually work.';
     return '';
   }
 
@@ -242,21 +243,28 @@ export class SpotifySource {
           reject(new Error('Premium required for in-browser playback.'));
         });
         player.addListener('initialization_error', ({ message }) => { this.sdkError = message || 'initialization error'; this.onStatus?.('spotify', 'remote'); reject(new Error(message)); });
-        player.addListener('authentication_error', () => {
+        // the player failed to sign in or connect: find out why once, say it plainly, fall back
+        let failed = false;
+        const fail = (kind, detail) => {
+          if (failed) return;
+          failed = true;
+          this.sdkError = kind;
+          this.diagnose(detail).then((reason) => { this.sdkReason = reason; this.onStatus?.('spotify', 'remote'); reject(new Error(this.sdkHelp)); });
+        };
+        player.addListener('authentication_error', ({ message }) => {
           // first a fresh token and one reconnect: a token that lapsed between refreshes fails the same way
           if (!this.authRetried) {
             this.authRetried = true;
             this.exchange({ grant_type: 'refresh_token', refresh_token: store.get(K.tok)?.refresh })
               .then(() => { player.disconnect(); return player.connect(); })
-              .catch(() => { this.sdkError = 'auth'; this.onStatus?.('spotify', 'remote'); reject(new Error(this.sdkHelp)); });
+              .then((ok) => { if (!ok) fail('auth', message); })
+              .catch(() => fail('auth', message));
             return;
           }
-          this.sdkError = 'auth';
-          this.onStatus?.('spotify', 'remote');
-          reject(new Error(this.sdkHelp));
+          fail('auth', message);
         });
         player.addListener('player_state_changed', (s) => this.fromSdk(s));
-        player.connect().then((ok) => { if (!ok) { this.sdkError = 'connect refused'; reject(new Error('connect refused')); } });
+        player.connect().then((ok) => { if (!ok && !this.authRetried) fail('connect', 'connect() returned false'); });
       };
       if (!document.querySelector('script[data-spotify-sdk]')) {
         const s = document.createElement('script');
@@ -268,6 +276,35 @@ export class SpotifySource {
         window.onSpotifyWebPlaybackSDKReady();
       }
     });
+  }
+
+  // Why the in-browser player could not start. The player reaches Spotify over apresolve and a dealer
+  // websocket (the token rides in its URL); tracking protection and ad blockers often stop exactly
+  // these, and the SDK then reports a bare "Authentication failed". The details go to the console.
+  async diagnose(detail = '') {
+    const status = async (u, opts = {}) => {
+      try { return (await fetch(u, { ...opts, signal: AbortSignal.timeout(6000) })).status; } catch { return 0; }
+    };
+    let dealer = null, hosts = null;
+    try { hosts = await (await fetch('https://apresolve.spotify.com/?type=dealer', { signal: AbortSignal.timeout(6000) })).json(); } catch { /* blocked */ }
+    if (hosts?.dealer?.length) {
+      const tok = await this.token().catch(() => '');
+      dealer = await new Promise((res) => {
+        let ws;
+        const done = (v) => { clearTimeout(timer); try { ws?.close(); } catch { /* closed */ } res(v); };
+        const timer = setTimeout(() => done(false), 6000);
+        try {
+          ws = new WebSocket(`wss://${hosts.dealer[0].replace(/:443$/, '')}/?access_token=${encodeURIComponent(tok)}`);
+          ws.onopen = () => done(true);
+          ws.onerror = () => done(false);
+        } catch { done(false); }
+      });
+    }
+    const scope = await status('https://api.spotify.com/v1/melody/v1/check_scope?scope=web-playback',
+      { headers: { Authorization: `Bearer ${await this.token().catch(() => '')}` } });
+    const reason = !hosts || dealer === false ? 'blocked' : scope === 403 ? 'account' : 'unknown';
+    console.warn('[crackle] Spotify player could not start', { error: this.sdkError, detail, apresolve: !!hosts, dealerSocket: dealer, checkScope: scope, reason, browser: navigator.userAgent });
+    return reason;
   }
 
   // Resolves with this screen's device id, or null when the in-browser player is unavailable.
@@ -289,7 +326,7 @@ export class SpotifySource {
     if (here) return here;
     const list = (await this.api('/me/player/devices'))?.devices || [];
     const d = list.find((x) => x.is_active) || list.find((x) => !x.is_restricted);
-    if (!d) throw new Error(this.sdkHelp || 'No Spotify device found. Open Spotify on your phone or computer and try again.');
+    if (!d) throw new Error(`${this.sdkHelp ? `${this.sdkHelp} ` : ''}Open Spotify on your phone or computer and try again.`);
     return d.id;
   }
 

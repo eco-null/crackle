@@ -208,6 +208,8 @@ function renderStatus() {
     $('#sp-hint').textContent = `${spotify.sdkHelp} Until then, songs start in your Spotify app and the turntable follows.`;
   }
   $('#sp-setup').hidden = spotify.connected;
+  $('#sp-simple').hidden = !spotify.builtIn;
+  $('#sp-dev').hidden = spotify.builtIn;
   $('#sp-connected').hidden = !spotify.connected;
   $('#sp-here').disabled = !spotify.deviceId;
   $('#sp-drm').hidden = spotify.sdkError !== 'drm';
@@ -585,6 +587,7 @@ function buildSheets() {
     if (/^[0-9a-f]{32}$/i.test(spotify.clientId)) run(() => spotify.login());
     else { openSheet('sources'); $('#sp-client').focus(); }
   });
+  $('#sp-login2').addEventListener('click', () => run(() => spotify.login()));
   $('#sp-form').addEventListener('submit', (e) => { e.preventDefault(); spotify.clientId = $('#sp-client').value; run(() => spotify.login()); });
   $('#sp-here').addEventListener('click', () => spotify.prime() || run(async () => { activate(spotify); spotify.start(); await spotify.playHere(); }));
   $('#sp-drm').addEventListener('click', () => run(async () => {
