@@ -537,6 +537,11 @@ document.querySelectorAll('dialog').forEach((d) => {
   d.addEventListener('close', wake);
   if (d.classList.contains('side')) d.addEventListener('close', sideClosed);
 });
+// a side sheet closes on a click anywhere outside it; the dock button that opens it toggles it itself
+addEventListener('pointerdown', (e) => {
+  const side = document.querySelector('dialog.side[open]');
+  if (side && !side.contains(e.target) && !e.target.closest('[data-open]')) side.close();
+});
 
 function buildSheets() {
   for (const m of MATERIALS) {
