@@ -549,6 +549,10 @@ export class Turntable {
     this.ao.updateGtaoMaterial({ radius: 2.2, distanceExponent: 1.4, thickness: 1.2, scale: 1.15, samples: 16 });
     this.ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 16 });
     this.ao.blendIntensity = .9;
+    // ambient occlusion is a soft, low-frequency term: its normal pass, sampling and denoise run at half
+    // resolution and are upsampled in the blend. A quarter of the pixels, the same look.
+    const aoSize = this.ao.setSize.bind(this.ao);
+    this.ao.setSize = (w, h) => aoSize(Math.max(1, Math.round(w / 2)), Math.max(1, Math.round(h / 2)));
     const hide = this.ao.overrideVisibility.bind(this.ao);
     // see-through helpers (shadow quads, the lamp beam) must not enter the AO depth/normal pass, or it
     // treats them as solid surfaces and greys out their whole rectangle
@@ -1397,16 +1401,20 @@ export class Turntable {
     const dt = Math.min(.1, (now - this.last) / 1000);
     this.last = now;
     requestAnimationFrame(this.loop);
-    // a still scene (record stopped, nothing settling) only drifts very slowly: 30 fps looks the same
+    // At most 60 frames a second, whatever the display refresh: a 144 Hz monitor would otherwise draw
+    // the full scene 144 times a second for motion that 60 already shows smoothly. A still scene (record
+    // stopped, nothing settling) only drifts very slowly, so it gets 30.
     this.held = (this.held || 0) + dt;
-    if (!this.busy && !this.skipped) { this.skipped = true; return; }
-    this.skipped = false;
+    this.budget = (this.budget || 0) + dt;
+    const interval = this.busy ? 1 / 60 : 1 / 30;
+    if (this.budget < interval * .9) return;
+    this.budget = Math.max(0, Math.min(interval, this.budget - interval));   // keep the cadence, bank at most a frame
     const step = Math.min(.1, this.held);
     this.held = 0;
     this.step(step);
     if (this.shadowsDirty()) this.renderer.shadowMap.needsUpdate = true;
     this.render();
-    if (!document.hidden && !this.noAdapt) this.adapt(dt);
+    if (!document.hidden && !this.noAdapt && this.busy) this.adapt(step);
   }
 
   // The deck's casters are the arm, lid, record (during a change), lamp post, knob, fader and buttons.
@@ -1551,9 +1559,9 @@ export class Turntable {
     this.lampUp = Math.max(0, Math.min(1.08, spring('lampVel', this.lampUp ?? 1, this.lamp ? 1 : 0, 70)));
     // retracted, the head rests just above its collar (collar top .5 + shell radius .6), level
     this.lampPost.position.y = TOP - (1 - this.lampUp) * 5.3;
-    const lampOn = this.lamp && this.loaded && this.lampUp > .9;
+    const lampOn = this.lamp && this.lampUp > .9;          // a stylus lamp is a switch, not tied to playback
     this.lampLevel = approach(this.lampLevel || 0, lampOn ? 1 : 0, lampOn ? 2.2 : 5, dt);
-    const s = stylusAt(this.armAngle);
+    const s = stylusAt(Math.max(this.armAngle, A_LEADIN));   // parked, it lights the record's edge
     const aim = this.lampAim || (this.lampAim = new THREE.Vector3(s.x, REC_TOP, s.z));
     aim.x = approach(aim.x, s.x - .6, 4, dt); aim.z = approach(aim.z, s.z + .4, 4, dt); aim.y = REC_TOP;
     const look = this.lampLook || (this.lampLook = new THREE.Vector3());

@@ -153,9 +153,41 @@ export class SpotifySource {
   }
 
   // --- Web Playback SDK ---
+  // Spotify's audio is DRM-protected (Widevine). Firefox forks often ship with DRM switched off;
+  // without it the Web Playback SDK cannot start, so find that out first and say so plainly.
+  async drmAvailable() {
+    if (!navigator.requestMediaKeySystemAccess) return false;
+    try {
+      await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+        initDataTypes: ['cenc'], audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+      }]);
+      return true;
+    } catch { return false; }
+  }
+
+  get sdkHelp() {
+    if (this.sdkError === 'drm') {
+      return /firefox|zen|librewolf|floorp|waterfox/i.test(navigator.userAgent)
+        ? 'Protected playback (DRM) is off in this browser, so Spotify cannot play here. Turn on Settings → General → "Play DRM-controlled content", then reload. Chrome and Edge work out of the box.'
+        : 'This browser cannot play protected audio (DRM/Widevine), so Spotify cannot play here. In Brave, enable Widevine in Settings → Extensions. Chrome and Edge work out of the box.';
+    }
+    if (this.sdkError === 'premium') return 'Playing inside the browser needs Spotify Premium.';
+    if (this.sdkError) return `The Spotify player could not start here (${this.sdkError}).`;
+    return '';
+  }
+
   startSdk() {
     if (this.sdkPromise) return this.sdkPromise;
-    this.sdkPromise = new Promise((resolve, reject) => {
+    this.sdkPromise = this.drmAvailable().then((ok) => {
+      if (!ok) { this.sdkError = 'drm'; this.onStatus?.('spotify', 'remote'); throw new Error(this.sdkHelp); }
+      return this.loadSdk();
+    });
+    this.sdkPromise.catch(() => { this.sdkFailed = true; });
+    return this.sdkPromise;
+  }
+
+  loadSdk() {
+    return new Promise((resolve, reject) => {
       window.onSpotifyWebPlaybackSDKReady = () => {
         const player = new window.Spotify.Player({
           name: 'Crackle',
@@ -170,13 +202,14 @@ export class SpotifySource {
         });
         player.addListener('not_ready', () => { this.deviceId = null; });
         player.addListener('account_error', () => {
+          this.sdkError = 'premium';
           this.onStatus?.('spotify', 'remote');
           reject(new Error('Premium required for in-browser playback.'));
         });
-        player.addListener('initialization_error', ({ message }) => { this.onStatus?.('spotify', 'remote'); reject(new Error(message)); });
-        player.addListener('authentication_error', ({ message }) => reject(new Error(message)));
+        player.addListener('initialization_error', ({ message }) => { this.sdkError = message || 'initialization error'; this.onStatus?.('spotify', 'remote'); reject(new Error(message)); });
+        player.addListener('authentication_error', ({ message }) => { this.sdkError = message || 'authentication error'; reject(new Error(message)); });
         player.addListener('player_state_changed', (s) => this.fromSdk(s));
-        player.connect();
+        player.connect().then((ok) => { if (!ok) { this.sdkError = 'connect refused'; reject(new Error('connect refused')); } });
       };
       if (!document.querySelector('script[data-spotify-sdk]')) {
         const s = document.createElement('script');
@@ -188,8 +221,6 @@ export class SpotifySource {
         window.onSpotifyWebPlaybackSDKReady();
       }
     });
-    this.sdkPromise.catch(() => { this.sdkFailed = true; });
-    return this.sdkPromise;
   }
 
   // Resolves with this screen's device id, or null when the in-browser player is unavailable.
@@ -206,7 +237,7 @@ export class SpotifySource {
     if (here) return here;
     const list = (await this.api('/me/player/devices'))?.devices || [];
     const d = list.find((x) => x.is_active) || list.find((x) => !x.is_restricted);
-    if (!d) throw new Error('No Spotify device found. Open Spotify on your phone or computer, or use Premium to play here.');
+    if (!d) throw new Error(this.sdkHelp || 'No Spotify device found. Open Spotify on your phone or computer and try again.');
     return d.id;
   }
 
@@ -234,7 +265,7 @@ export class SpotifySource {
 
   async playHere() {
     const id = await this.readyDevice();
-    if (!id) throw new Error('This browser cannot play Spotify. Play from your phone and Crackle will follow.');
+    if (!id) throw new Error(this.sdkHelp || 'This browser cannot play Spotify. Play from your phone and Crackle will follow.');
     await this.api('/me/player', { method: 'PUT', body: { device_ids: [id], play: true } });
   }
 
@@ -284,7 +315,7 @@ export class SpotifySource {
   }
 
   async search(q) {
-    const j = await this.api(`/search?type=track&limit=7&q=${encodeURIComponent(q)}`);
+    const j = await this.api(`/search?type=track&limit=10&q=${encodeURIComponent(q)}`);
     return (j?.tracks?.items || []).map((t) => ({
       source: 'spotify', uri: t.uri, title: t.name, artist: t.artists.map((a) => a.name).join(', '),
       album: t.album?.name || '', art: t.album?.images?.[0]?.url || '', thumb: t.album?.images?.at(-1)?.url || '',

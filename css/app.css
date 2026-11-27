@@ -149,11 +149,18 @@ body.focus #panel { opacity: 0; transform: translate(-2rem, -50%); pointer-event
 #search:focus-within { border-color: var(--ink-3); }
 #results {
   position: absolute; left: 0; right: 0; top: calc(100% + .5rem); z-index: 10; margin: 0; padding: .35rem; list-style: none;
-  border-radius: 16px; max-height: 50vh; overflow: auto;
-  background: radial-gradient(120% 80% at 20% 0%, var(--glass-sheen), transparent 55%), var(--glass-strong);
+  border-radius: 16px; max-height: 50vh; overflow: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--hair) transparent;
+  /* nearly opaque: the panel text behind it must not show through the results */
+  background: radial-gradient(120% 80% at 20% 0%, var(--glass-sheen), transparent 55%), color-mix(in srgb, var(--bg) 97%, transparent);
 }
 #results li { display: flex; align-items: center; gap: .7rem; padding: .45rem .55rem; border-radius: 10px; cursor: pointer; }
-#results li[aria-selected="true"], #results li:hover { background: var(--hair); }
+#results li[aria-selected="true"], #results li[data-i]:hover { background: var(--hair); }
+#results.up { top: auto; bottom: calc(100% + .5rem); }
+#results li.group { display: block; padding: .7rem .6rem .3rem; font-family: var(--mono); font-size: .66rem; font-weight: 600; letter-spacing: .05em; color: var(--ink-3); cursor: default; }
+#results li.group:first-child { padding-top: .35rem; }
+body.searching #panel { z-index: 8; }
+body.searching #dock { opacity: 0; transform: translateY(.6rem); pointer-events: none; }
 #results img { width: 2.4rem; height: 2.4rem; border-radius: 6px; object-fit: cover; flex: none; background: var(--hair); }
 #results .t { min-width: 0; flex: 1; }
 #results b { display: block; font-size: .86rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -345,7 +352,7 @@ body.customizing #b-flyrics { opacity: 0; pointer-events: none; }
   #search { margin-top: 1rem; }
   #transport { margin-top: .9rem; }
   #dock { left: 50%; transform: translateX(-50%); bottom: 2.2vh; max-width: calc(100vw - 32px); overflow-x: auto; }
-  body.idle #dock { transform: translate(-50%, .6rem); }
+  body.idle #dock, body.searching #dock { transform: translate(-50%, .6rem); }
   .room-veil { background: linear-gradient(0deg, var(--bg) 0%, transparent 60%); opacity: .75; }
   #yt-card { width: 220px; height: 200px; right: 16px; top: 16px; bottom: auto; }
   dialog.sheet.side { left: 3vw; right: 3vw; width: auto; top: auto; bottom: calc(2.2vh + 3.8rem); max-height: 48vh; transform: translateY(1rem); }

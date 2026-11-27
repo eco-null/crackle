@@ -200,7 +200,7 @@ function renderStatus() {
   $('#sp-login').hidden = spotify.connected;
   if (spotify.connected && spotify.user) {
     $('#sp-hint').textContent = spotify.user.premium && spotify.sdkFailed
-      ? `Logged in as ${spotify.user.name}. This browser can't play protected audio, so songs start in your Spotify app and the turntable follows. Chrome or Edge play them right here.`
+      ? `Logged in as ${spotify.user.name}. ${spotify.sdkHelp} Until then, songs start in your Spotify app and the turntable follows.`
       : spotify.user.premium
       ? `Logged in as ${spotify.user.name}. Search plays full songs here, or play from any Spotify app and the turntable follows.`
       : `Logged in as ${spotify.user.name}. Playing inside the browser needs Premium; play from any Spotify app and the turntable follows.`;
@@ -307,7 +307,7 @@ const prev = () => active && run(() => active.prev());
 // ---------- search: previews without an account, Spotify when connected, links ----------
 let searchCtl = null, results = [], sel = -1, searchTimer;
 async function itunes(q, signal) {
-  const r = await fetch(`https://itunes.apple.com/search?media=music&entity=song&limit=8&term=${encodeURIComponent(q)}`, { signal });
+  const r = await fetch(`https://itunes.apple.com/search?media=music&entity=song&limit=12&term=${encodeURIComponent(q)}`, { signal });
   if (!r.ok) throw new Error('Search is unavailable right now.');
   const j = await r.json();
   return j.results.filter((x) => x.previewUrl).map((x) => ({
@@ -316,25 +316,50 @@ async function itunes(q, signal) {
     art: (x.artworkUrl100 || '').replace(/\/\d+x\d+bb\./, '/1000x1000bb.'),
   }));
 }
+const GROUPS = { spotify: 'Spotify', youtube: 'YouTube', preview: '30-second previews' };
 function renderResults(note) {
   const ul = $('#results');
   ul.replaceChildren();
   if (note) { const li = document.createElement('li'); li.className = 'note'; li.textContent = note; ul.append(li); }
+  let group = '';
   results.forEach((r, i) => {
+    if (r.source !== group) {
+      group = r.source;
+      const h = document.createElement('li'); h.className = 'group'; h.setAttribute('role', 'presentation'); h.textContent = GROUPS[group] || group;
+      ul.append(h);
+    }
     const li = document.createElement('li');
     li.setAttribute('role', 'option');
+    li.dataset.i = i;
     li.setAttribute('aria-selected', String(i === sel));
     const img = document.createElement('img'); img.alt = ''; img.loading = 'lazy'; if (r.thumb || r.art) img.src = r.thumb || r.art;
     const t = document.createElement('div'); t.className = 't';
     const b = document.createElement('b'); b.textContent = r.title;
     const s = document.createElement('small'); s.textContent = [r.artist, r.album].filter(Boolean).join(' · ');
     t.append(b, s);
-    const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = r.source === 'preview' ? '30 s' : r.source;
-    li.append(img, t, tag);
+    li.append(img, t);
     li.addEventListener('pointerdown', (e) => { e.preventDefault(); choose(i); });
     ul.append(li);
   });
-  ul.hidden = !note && !results.length;
+  const open = !!note || results.length > 0;
+  ul.hidden = !open;
+  body.classList.toggle('searching', open);
+  if (open) placeResults();
+}
+// open the list toward the larger free space and stop it above the screen edge
+function placeResults() {
+  const ul = $('#results'), box = $('#search').getBoundingClientRect();
+  const below = innerHeight - box.bottom - 24, above = box.top - 24;
+  const up = below < 360 && above > below;
+  ul.classList.toggle('up', up);
+  ul.style.maxHeight = `${Math.round(Math.max(180, Math.min(up ? above : below, innerHeight * .72)))}px`;
+}
+function markSelected() {
+  $('#results').querySelectorAll('li[data-i]').forEach((li) => {
+    const on = +li.dataset.i === sel;
+    li.setAttribute('aria-selected', String(on));
+    if (on) li.scrollIntoView({ block: 'nearest' });
+  });
 }
 async function search(q) {
   searchCtl?.abort();
@@ -345,7 +370,7 @@ async function search(q) {
     const quiet = (p) => p.catch((e) => { if (e.name === 'AbortError') throw e; return []; });
     const [sp, yt, it] = await Promise.all([
       spotify.connected ? quiet(spotify.search(q)) : [],
-      quiet(searchYouTube(q, signal, spotify.connected ? 4 : 5)),
+      quiet(searchYouTube(q, signal, 8)),
       spotify.connected ? [] : quiet(itunes(q, signal)),
     ]);
     if (signal.aborted) return;
@@ -356,7 +381,7 @@ async function search(q) {
     if (e.name !== 'AbortError') { results = []; renderResults(e.message); }
   }
 }
-function closeResults() { $('#results').hidden = true; results = []; sel = -1; }
+function closeResults() { $('#results').hidden = true; results = []; sel = -1; body.classList.remove('searching'); }
 function choose(i) {
   const r = results[i];
   if (!r) return;
@@ -403,7 +428,7 @@ $('#q').addEventListener('keydown', (e) => {
     if (!results.length) return;
     e.preventDefault();
     sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + results.length) % results.length;
-    renderResults();
+    markSelected();
   } else if (e.key === 'Enter') { e.preventDefault(); submitQuery(e.target.value); }
   else if (e.key === 'Escape') { closeResults(); e.target.blur(); }
 });

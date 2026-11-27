@@ -69,7 +69,8 @@ export function splitTitle(raw, channel = '') {
     .replace(/\s*[([](official|lyric|lyrics|audio|video|visualizer|music video|hd|4k|mv|full album|live)[^)\]]*[)\]]/gi, '')
     .replace(/\s*\|.*$/, '')
     .trim();
-  const m = clean.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+  // the artist part never contains brackets: "Title (2015 - Remaster)" is not "artist - title"
+  const m = clean.match(/^([^()[\]]+?)\s+[-–—]\s+(.+)$/);
   if (m) return { artist: m[1].trim(), title: m[2].trim() };
   return { artist: channel.replace(/\s*-\s*Topic$/i, '').replace(/VEVO$/i, '').trim(), title: clean };
 }
