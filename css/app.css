@@ -218,6 +218,24 @@ body.idle, body.idle * { cursor: none !important; }
 
 #yt-card { position: fixed; right: 2.4vw; bottom: 3.6vh; z-index: 7; width: 320px; height: 216px; border-radius: 16px; overflow: hidden; padding: 0 4px 4px; display: flex; flex-direction: column; }
 #yt-card[hidden] { display: none; }
+/* cover mode: the card fills a 16:9 slot that takes the cover's place in the panel; app.js keeps it aligned */
+#yt-slot { display: none; }
+body.yt-panel #cover { display: none; }
+body.yt-panel #yt-slot { display: block; width: 100%; max-width: 26rem; aspect-ratio: 16 / 9; min-height: 200px; margin-bottom: 1.1rem; border-radius: 12px; }
+#yt-card.in-panel { padding: 0; border-radius: 12px; box-shadow: 0 18px 40px -16px rgba(40, 28, 16, .45), 0 0 0 1px var(--hair); }
+#yt-card.in-panel .yt-grip, #yt-card.ghost .yt-grip { display: none; }
+#yt-card.in-panel #yt-mount { border-radius: 12px; }
+/* ghost mode: at full zoom in focus mode the clip covers the screen in front of the record, see-through,
+   and lets the wheel reach the deck below so zooming out still works */
+#yt-card.ghost {
+  left: 50% !important; top: 50% !important; right: auto !important; bottom: auto !important;
+  width: max(100vw, 177.78vh) !important; height: max(100vh, 56.25vw) !important; transform: translate(-50%, -50%);
+  padding: 0; border-radius: 0; background: none; border: 0; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  z-index: 4; opacity: var(--ghost, .5); pointer-events: none; animation: ghost-in 1.2s var(--ease);
+}
+#yt-card.ghost #yt-mount { border-radius: 0; }
+@keyframes ghost-in { from { opacity: 0; } }
+.yt-opts { margin-top: .8rem; flex-direction: column; align-items: flex-start; gap: .6rem; }
 .yt-grip { height: 16px; flex: none; display: grid; place-items: center; cursor: grab; touch-action: none; }
 .yt-grip i { width: 34px; height: 4px; border-radius: 4px; background: var(--ink-3); opacity: .6; }
 #yt-card.dragging .yt-grip { cursor: grabbing; }

@@ -12,7 +12,7 @@ const body = document.body;
 const PREFS_KEY = 'vinyl.prefs.v2';
 const prefs = Object.assign({
   material: 'walnut', vinyl: 'black', room: 'cream', lyrics: true, lid: false, focus: false, focusLyrics: false,
-  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver',
+  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver', ytPanel: false, ytGhost: false,
 }, (() => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; } })());
 const save = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* private mode */ } };
 // rooms renamed when the photographed set replaced the first backdrops
@@ -268,6 +268,7 @@ function frame(now) {
   if (!ui.bar) Object.assign(ui, { bar: $('#progress .bar i'), pos: $('#t-pos'), dur: $('#t-dur'), play: $('#b-play'), use: $('#b-play use') });
   const t = state.track;
   const pos = position();
+  if (active === youtube || ytMode !== 'card') layoutYt();
   tt.wantSpin = !!t && state.playing;
   if (t && !tt.dragArm) {
     tt.progress = t.duration ? pos / t.duration : ((now - liveStart) / 1000 % 1500) / 1500;
@@ -570,6 +571,8 @@ function buildSheets() {
     el.addEventListener('change', () => { prefs[key] = el.checked; save(); after?.(); });
   };
   bind('#o-clock', 'clock', tickClock);
+  bind('#o-ytpanel', 'ytPanel', layoutYt);
+  bind('#o-ytghost', 'ytGhost', layoutYt);
   bind('#o-motion', 'motion', () => { tt.followPointer = prefs.motion; });
   bind('#o-glow', 'glow', () => body.classList.toggle('glow', prefs.glow && !!tt.albumColor));
   $('#o-blur').value = prefs.blur;
@@ -606,11 +609,38 @@ function buildSheets() {
 // ---------- YouTube mini player: drag it by its grip; position is kept as a fraction of the screen ----------
 function placeYtCard() {
   const card = $('#yt-card');
-  if (!prefs.ytPos) return;
+  if (!prefs.ytPos || card.classList.contains('in-panel') || card.classList.contains('ghost')) return;
   const w = card.offsetWidth || 320, h = card.offsetHeight || 216;
   const x = Math.max(8, Math.min(innerWidth - w - 8, prefs.ytPos.x * innerWidth));
   const y = Math.max(8, Math.min(innerHeight - h - 8, prefs.ytPos.y * innerHeight));
   Object.assign(card.style, { left: `${x}px`, top: `${y}px`, right: 'auto', bottom: 'auto' });
+}
+// Where the YouTube player is drawn: the floating card (default), the cover's slot in the panel, or a
+// see-through full-screen ghost over the record at full zoom in focus mode. The iframe itself never
+// moves in the DOM (moving it would reload the video); only its box on screen changes.
+const narrowLayout = matchMedia('(max-width: 900px), (max-aspect-ratio: 1/1)');
+let ytMode = 'card';
+function layoutYt() {
+  const card = $('#yt-card');
+  const on = active === youtube && !card.hidden;
+  const ghost = on && prefs.ytGhost && prefs.focus && tt.zoomTarget >= 3.1;
+  const panel = on && !ghost && prefs.ytPanel && !prefs.focus && !body.classList.contains('customizing') && !narrowLayout.matches;
+  const mode = ghost ? 'ghost' : panel ? 'panel' : 'card';
+  body.classList.toggle('yt-panel', panel);
+  if (mode !== ytMode) {
+    ytMode = mode;
+    card.classList.toggle('ghost', ghost);
+    card.classList.toggle('in-panel', panel);
+    card.removeAttribute('style');
+    if (mode === 'card') placeYtCard();
+  }
+  if (panel) {
+    const r = $('#yt-slot').getBoundingClientRect(), st = card.style;
+    const px = (v) => `${Math.round(v)}px`;
+    if (st.left !== px(r.left) || st.top !== px(r.top) || st.width !== px(r.width) || st.height !== px(r.height)) {
+      Object.assign(st, { left: px(r.left), top: px(r.top), width: px(r.width), height: px(r.height), right: 'auto', bottom: 'auto' });
+    }
+  }
 }
 (() => {
   const card = $('#yt-card'), grip = card.querySelector('.yt-grip');

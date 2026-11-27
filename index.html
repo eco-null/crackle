@@ -68,6 +68,7 @@
 
   <main id="panel" aria-live="polite">
     <div id="cover" class="empty"><img alt="" hidden></div>
+    <div id="yt-slot" aria-hidden="true"></div>
     <p class="src-line mono"><span class="dot"></span><span id="src-label">no record</span></p>
     <h1 id="t-title">Put a record on</h1>
     <p id="t-artist">Search a song, paste a link or drop your files.</p>
@@ -136,6 +137,10 @@
       <div class="src-head"><svg><use href="#i-youtube"/></svg><h3>YouTube</h3><span class="badge mono" id="yt-badge">idle</span></div>
       <p class="hint">Paste a video or playlist link into search.</p>
       <div class="chips" id="yt-suggest"></div>
+      <div class="toggles yt-opts">
+        <label class="switch"><input type="checkbox" id="o-ytpanel"><span>Show the video in place of the cover</span></label>
+        <label class="switch"><input type="checkbox" id="o-ytghost"><span>Ghost video over the record at full zoom in focus mode</span></label>
+      </div>
     </section>
     <section class="src">
       <div class="src-head"><svg><use href="#i-file"/></svg><h3>Files</h3><span class="badge mono" id="lf-badge">idle</span></div>

@@ -60,6 +60,10 @@ Only the record. Scroll to move in close to the needle. One button brings the ly
 
 Search covers Spotify (when connected) and YouTube in one box. Synced lyrics come from [LRCLIB](https://lrclib.net).
 
+YouTube videos play in a small card you can drag anywhere. Two optional settings in **Sources → YouTube**, both off by default:
+- **In place of the cover:** the video takes the cover's spot in the panel.
+- **Ghost video:** at full zoom in focus mode, the clip floats see-through over the record. This places the page in front of YouTube's player, which YouTube's embed policies don't allow, so it stays opt-in.
+
 <img src="docs/phone.webp" alt="Crackle on a phone" width="260" align="right">
 
 ## Made for a TV
