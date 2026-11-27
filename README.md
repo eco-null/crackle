@@ -88,6 +88,10 @@ YouTube videos play in a small card you can drag anywhere. Two optional settings
 | R | Next room | Enter | Full screen |
 | S | Sources | Esc | Close a panel |
 
+## Install it as an app
+
+Crackle is a web app you can install: in Chrome or Edge press the install button in the dock (or the icon in the address bar), on Android use **Add to Home screen**, on iPhone and iPad **Share → Add to Home Screen**. It opens in its own window without browser chrome, and it opens even without a connection (music still needs one).
+
 ## Run it yourself
 
 No build step, no dependencies.

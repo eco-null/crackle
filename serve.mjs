@@ -10,7 +10,7 @@ const host = process.env.HOST || '127.0.0.1';
 const types = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.png': 'image/png',
-  '.json': 'application/json', '.ico': 'image/x-icon',
+  '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.ico': 'image/x-icon',
 };
 
 createServer(async (req, res) => {

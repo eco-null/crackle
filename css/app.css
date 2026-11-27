@@ -372,6 +372,25 @@ body.customizing #panel { opacity: 0; transform: translate(-2rem, -50%); pointer
 body.customizing #deck-zone { left: 35vw; right: 1vw; }
 body.customizing #b-flyrics { opacity: 0; pointer-events: none; }
 
+/* ---------- idle: once search and dock have faded, the cover, progress bar and lyrics settle into
+   one narrow column (about half the bar's usual width), the lyrics get the freed height, and the
+   deck moves into the room it leaves. Desktop layout only; the transitions carry every step. ---------- */
+@media (min-width: 901px) and (min-aspect-ratio: 1/1) {
+  #panel { transition: opacity .6s var(--ease), transform .8s var(--ease), width .9s var(--ease); }
+  #cover { transition: opacity .6s var(--ease), transform .8s var(--ease), width .9s var(--ease); }
+  #t-title { transition: font-size .9s var(--ease); }
+  #lyrics { transition: height .9s var(--ease), margin .9s var(--ease); }
+  #search { transition: opacity .5s var(--ease), border-color .15s var(--ease), height .9s var(--ease), margin .9s var(--ease); }
+  #sp-login { transition: opacity .5s var(--ease), background-color .15s var(--ease), height .9s var(--ease), margin .9s var(--ease); }
+  body.idle:not(.focus):not(.customizing):not(.yt-panel) #panel { width: 14rem; }
+  body.idle:not(.focus):not(.customizing):not(.yt-panel) #cover { width: 100%; }
+  body.idle:not(.focus):not(.customizing):not(.yt-panel) #t-title { font-size: clamp(1.4rem, 1.6vw, 2.3rem); }
+  body.idle:not(.focus):not(.customizing):not(.yt-panel) #search:not(:focus-within) { height: 0; margin-top: 0; overflow: hidden; }
+  body.idle:not(.focus):not(.customizing):not(.yt-panel) #sp-login { height: 0; margin-top: 0; overflow: hidden; }
+  body.idle:not(.focus):not(.customizing):not(.yt-panel) #lyrics { height: min(16rem, 34vh); }
+  body.idle:not(.focus):not(.customizing):not(.yt-panel) #deck-zone { left: calc(9.5vw + 14rem); }
+}
+
 /* ---------- narrow and portrait ---------- */
 @media (max-width: 900px), (max-aspect-ratio: 1/1) {
   #deck-zone { left: 3vw; right: 3vw; top: 7vh; bottom: auto; height: 44vh; }

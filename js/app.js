@@ -452,11 +452,16 @@ $('#q').addEventListener('blur', () => setTimeout(closeResults, 120));
 // ---------- chrome: idle, focus, fullscreen, lid, lyrics ----------
 let idleTimer;
 function wake() {
+  // the idle layout gives the deck more room (see css), so its framing follows the class
+  if (body.classList.contains('idle')) { requestAnimationFrame(() => placeDeck()); if (!prefs.focus) tt.setZoom(1); }
   body.classList.remove('idle');
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
     if (document.querySelector('dialog[open]') || $('#dock').matches(':hover') || !$('#vol-pop').hidden || document.activeElement === $('#q')) return;
     body.classList.add('idle');
+    requestAnimationFrame(() => placeDeck());
+    if (!prefs.focus && !body.classList.contains('customizing')) tt.setZoom(1.08);   // and the deck grows a touch
+    setTimeout(() => { lyricIndex = -1; }, 950);   // the lyrics box grew: re-centre the current line
     if (document.activeElement?.closest('#dock, #transport')) document.activeElement.blur();
   }, 4000);
 }
@@ -807,3 +812,18 @@ setTimeout(() => body.classList.remove('booting'), 250);
 })();
 
 window.vinyl = { tt, state, prefs, activate, sources: { spotify, youtube, local } };
+
+// ---------- install as an app ----------
+// Chromium browsers offer installation through this event; the dock button appears only then, and
+// disappears once installed or when already running as the app.
+let installPrompt = null;
+addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; $('#b-install').hidden = false; });
+$('#b-install').addEventListener('click', async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  const { outcome } = await installPrompt.userChoice.catch(() => ({}));
+  if (outcome === 'accepted') $('#b-install').hidden = true;
+  installPrompt = null;
+});
+addEventListener('appinstalled', () => { $('#b-install').hidden = true; toast('Crackle is installed. Open it from your apps.'); });
+if ('serviceWorker' in navigator && isSecureContext) navigator.serviceWorker.register('./sw.js').catch(() => { /* the site still works without it */ });
