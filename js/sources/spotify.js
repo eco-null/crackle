@@ -152,15 +152,18 @@ export class SpotifySource {
   // The same gesture lets Firefox and its forks show their "allow DRM content" prompt.
   prime() {
     try { this.player?.activateElement?.(); } catch { /* older SDK */ }
-    if (this.sdkError === 'drm') this.requestDrm();
+    if (!this.drmOk) this.requestDrm();       // asked inside the click, so the browser may prompt
   }
 
   // Ask the browser for protected playback. Call it from a click: Firefox-family browsers answer with
   // their DRM permission prompt. Once allowed, the in-browser player starts without a reload.
-  async requestDrm() {
-    const ok = await this.drmAvailable();
-    if (ok && this.sdkError === 'drm') { this.resetSdk(); this.startSdk().catch(() => {}); }
-    return ok;
+  requestDrm() {
+    this.drmPending ||= this.drmAvailable().then((ok) => {
+      this.drmPending = null;
+      if (ok && this.sdkError === 'drm') { this.resetSdk(); this.startSdk().catch(() => {}); }
+      return ok;
+    });
+    return this.drmPending;
   }
 
   resetSdk() {
@@ -189,6 +192,7 @@ export class SpotifySource {
       await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
         initDataTypes: ['cenc'], audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
       }]);
+      this.drmOk = true;
       return true;
     } catch { return false; }
   }
@@ -196,7 +200,7 @@ export class SpotifySource {
   get sdkHelp() {
     if (this.sdkError === 'drm') {
       return /firefox|zen|librewolf|floorp|waterfox/i.test(navigator.userAgent)
-        ? 'Protected playback (DRM) is off in this browser, so Spotify cannot play here. Press "Allow protected playback" in Sources → Spotify, or turn on Settings → General → "Play DRM-controlled content" and reload. Chrome and Edge work out of the box.'
+        ? 'Protected playback (DRM) is off in this browser, so Spotify cannot play here. Crackle asks for it when you play a song: allow it when the browser asks. Or turn on Settings → General → "Play DRM-controlled content" and reload. Chrome and Edge work out of the box.'
         : 'This browser cannot play protected audio (DRM/Widevine), so Spotify cannot play here. In Brave, enable Widevine in Settings → Extensions. Chrome and Edge work out of the box.';
     }
     if (this.sdkError === 'premium') return 'Playing inside the browser needs Spotify Premium.';
@@ -269,6 +273,11 @@ export class SpotifySource {
   // Resolves with this screen's device id, or null when the in-browser player is unavailable.
   async readyDevice(ms = 8000) {
     if (this.deviceId) return this.deviceId;
+    // DRM was off: the click that got here has asked for it (prime); if it is allowed now, wait for
+    // the player it restarts instead of falling back to another device
+    if (this.sdkError === 'drm' || this.drmPending) {
+      if (!(await (this.drmPending || this.requestDrm()))) return null;
+    }
     if (this.sdkFailed) return null;
     await Promise.race([this.startSdk().catch(() => {}), new Promise((r) => setTimeout(r, ms))]);
     return this.deviceId;
