@@ -99,8 +99,8 @@ body.focus #deck-zone { left: 4vw; right: 4vw; top: 4vh; bottom: 10vh; }
 /* focus mode: a quiet note on how to zoom; gone with the rest of the chrome when idle */
 #zoom-hint { display: flex; align-items: center; gap: .45rem; font-size: .74rem; letter-spacing: .01em; color: var(--ink-2); opacity: 0; transition: opacity .6s var(--ease); }
 #zoom-hint svg { width: 1.05rem; height: 1.05rem; stroke-width: 1.4; }
-body.focus #zoom-hint { opacity: .5; }
-body.focus.idle #zoom-hint { opacity: 0; }
+#zoom-hint { opacity: .5; }
+body.idle #zoom-hint, body.customizing #zoom-hint, body.searching #zoom-hint { opacity: 0; }
 @media (hover: none), (pointer: coarse) { #zoom-hint { display: none; } }
 
 /* ---------- panel ---------- */
@@ -371,6 +371,32 @@ dialog.sheet.side .toggles { flex-direction: column; align-items: flex-start; ga
 body.customizing #panel { opacity: 0; transform: translate(-2rem, -50%); pointer-events: none; }
 body.customizing #deck-zone { left: 35vw; right: 1vw; }
 body.customizing #b-flyrics { opacity: 0; pointer-events: none; }
+
+/* ---------- layout: search and login sit in the top bar beside the mark; the left column holds only
+   what is playing, in one aligned column: cover, title, artist, album, progress, transport, lyrics ---------- */
+.top-left { display: flex; align-items: center; gap: 1.6rem; min-width: 0; }
+#top #search { margin-top: 0; width: min(21rem, 24vw); height: 2.6rem; pointer-events: auto; }
+#top #sp-login { margin-top: 0; pointer-events: auto; }
+body.focus #top #search, body.focus #top #sp-login, body.customizing #top #search, body.customizing #top #sp-login { opacity: 0; pointer-events: none; }
+body.searching #top { z-index: 9; }
+#panel { width: min(23rem, 27vw); gap: 0; }
+#cover { width: 10.5rem; border-radius: 14px; margin-bottom: 1.5rem; }
+#t-title { margin-top: .45rem; font-size: clamp(1.8rem, 2.2vw, 3rem); line-height: 1.08; }
+#t-artist { margin-top: .45rem; font-size: 1.05rem; }
+#t-album { margin-top: .2rem; }
+#progress { margin-top: 1.6rem; }
+#progress .bar { height: 3px; }
+#transport { margin-top: 1.25rem; }
+#lyrics { margin-top: 2.2rem; height: 8.6rem; }
+@media (max-width: 900px), (max-aspect-ratio: 1/1) {
+  .top-left { flex: 1; gap: .8rem; }
+  .brand span { display: none; }
+  #top #search { flex: 1; width: auto; }
+  #top #sp-login { padding: 0 .75rem; }
+  #top #sp-login span { display: none; }
+  #deck-zone { top: 12vh; }
+  #lyrics { margin-top: .9rem; height: 4.6rem; }
+}
 
 /* ---------- idle: once search and dock have faded, the cover, progress bar and lyrics settle into
    one narrow column (about half the bar's usual width), the lyrics get the freed height, and the

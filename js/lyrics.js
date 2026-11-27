@@ -41,17 +41,22 @@ export async function fetchLyrics({ artist, title, album, duration }, signal) {
     if (duration) q.set('duration', Math.round(duration / 1000));
     hit = await getJson(`${API}/get?${q}`, signal).catch((e) => { if (e.name === 'AbortError') throw e; return null; });
   }
+  // Synced lyrics win whenever any version of the song has them: one entry can carry only plain text
+  // while another (a re-release, the album cut) is timed. Plain text is the last resort.
   const near = (x) => !duration || Math.abs(x.duration * 1000 - duration) < 8000;
-  const pick = (list) => list.find((x) => x.syncedLyrics && near(x)) || list.find((x) => x.syncedLyrics) || list.find((x) => x.plainLyrics);
-  if (!hit || (!hit.syncedLyrics && !hit.plainLyrics && !hit.instrumental)) {
+  const timed = (h) => !!(h && (h.syncedLyrics || h.instrumental));
+  const syncedIn = (list) => list.find((x) => x.syncedLyrics && near(x)) || list.find((x) => x.syncedLyrics);
+  const plainIn = (list) => list.find((x) => x.plainLyrics && near(x)) || list.find((x) => x.plainLyrics);
+  if (!timed(hit)) {
     const q = new URLSearchParams(a ? { track_name: t, artist_name: a } : { q: t });
-    hit = pick((await getJson(`${API}/search?${q}`, signal)) || []) || hit;
+    const list = (await getJson(`${API}/search?${q}`, signal)) || [];
+    hit = syncedIn(list) || (hit?.plainLyrics ? hit : plainIn(list)) || hit;
   }
-  // video titles and channel names are loose ("Artist - Topic", a label's channel): fall back to a
-  // free-text search, keeping only a match of the same length so a different song is not shown
-  if (!hit || (!hit.syncedLyrics && !hit.plainLyrics && !hit.instrumental)) {
-    const list = (await getJson(`${API}/search?${new URLSearchParams({ q: `${a} ${t}`.trim() })}`, signal)) || [];
-    hit = (duration ? list.filter(near) : list).find((x) => x.syncedLyrics || x.plainLyrics) || hit;
+  // video titles and channel names are loose ("Artist - Topic", a label's channel): a free-text search
+  // as well, keeping only entries of the same length there so a different song is not shown
+  if (!timed(hit)) {
+    const list = ((await getJson(`${API}/search?${new URLSearchParams({ q: `${a} ${t}`.trim() })}`, signal)) || []).filter(near);
+    hit = syncedIn(list) || (hit?.plainLyrics ? hit : plainIn(list)) || hit;
   }
   const result = hit ? { synced: parseLrc(hit.syncedLyrics), plain: hit.plainLyrics || '', instrumental: !!hit.instrumental } : null;
   cache.set(key, result);

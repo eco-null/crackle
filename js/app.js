@@ -450,17 +450,18 @@ $('#q').addEventListener('keydown', (e) => {
 $('#q').addEventListener('blur', () => setTimeout(closeResults, 120));
 
 // ---------- chrome: idle, focus, fullscreen, lid, lyrics ----------
-let idleTimer;
+let idleTimer, idleZoom = null;
 function wake() {
   // the idle layout gives the deck more room (see css), so its framing follows the class
-  if (body.classList.contains('idle')) { requestAnimationFrame(() => placeDeck()); if (!prefs.focus) tt.setZoom(1); }
+  if (body.classList.contains('idle')) { requestAnimationFrame(() => placeDeck()); if (idleZoom != null) { tt.setZoom(idleZoom); idleZoom = null; } }
   body.classList.remove('idle');
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
     if (document.querySelector('dialog[open]') || $('#dock').matches(':hover') || !$('#vol-pop').hidden || document.activeElement === $('#q')) return;
     body.classList.add('idle');
     requestAnimationFrame(() => placeDeck());
-    if (!prefs.focus && !body.classList.contains('customizing')) tt.setZoom(1.08);   // and the deck grows a touch
+    // and the deck grows a touch, on top of whatever zoom is set; waking gives the zoom back
+    if (!prefs.focus && !body.classList.contains('customizing')) { idleZoom = tt.zoomTarget; tt.setZoom(idleZoom * 1.08); }
     setTimeout(() => { lyricIndex = -1; }, 950);   // the lyrics box grew: re-centre the current line
     if (document.activeElement?.closest('#dock, #transport')) document.activeElement.blur();
   }, 4000);
@@ -736,14 +737,13 @@ function showZoom() {
   zoomTip = setTimeout(() => el.classList.remove('show'), 900);
 }
 $('#deck').addEventListener('wheel', (e) => {
-  if (!prefs.focus) return;
   e.preventDefault();
+  wake();                                   // first: waking hands back the zoom the idle view borrowed
   const step = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
   tt.setZoom(tt.zoomTarget * Math.exp(-step * (e.ctrlKey ? .01 : .0016)));
   showZoom();
-  wake();
 }, { passive: false });
-$('#deck').addEventListener('dblclick', () => { if (prefs.focus && tt.zoomTarget !== 1) { tt.setZoom(1); showZoom(); } });
+$('#deck').addEventListener('dblclick', () => { if (tt.zoomTarget !== 1) { tt.setZoom(1); showZoom(); } });
 $('#b-lyrics').addEventListener('click', () => setLyricsOn(!prefs.lyrics));
 $('#b-lid').addEventListener('click', () => setLid(!prefs.lid));
 $('#b-full').addEventListener('click', toggleFullscreen);

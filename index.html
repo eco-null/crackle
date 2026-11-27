@@ -67,7 +67,15 @@
   <div id="deck-zone" aria-hidden="true"></div>
 
   <header id="top">
-    <div class="brand"><img src="assets/mark.svg" alt="" width="26" height="26"><span>crackle</span></div>
+    <div class="top-left">
+      <div class="brand"><img src="assets/mark.svg" alt="" width="26" height="26"><span>crackle</span></div>
+      <div id="search" class="glass">
+        <svg aria-hidden="true"><use href="#i-search"/></svg>
+        <input id="q" type="search" placeholder="Search a song, or paste a link" autocomplete="off" spellcheck="false" aria-label="Search songs or paste a link" aria-controls="results">
+        <ul id="results" class="glass" role="listbox" hidden></ul>
+      </div>
+      <button id="sp-login" class="glass pill" type="button"><svg aria-hidden="true"><use href="#i-spotify"/></svg><span>Log in with Spotify</span></button>
+    </div>
     <div class="top-right">
       <div id="zoom-hint" aria-hidden="true"><svg><use href="#i-wheel"/></svg><span>Scroll to zoom · double-click to reset</span></div>
       <div class="clock mono" id="clock" hidden></div>
@@ -90,12 +98,6 @@
       <button class="round primary" id="b-play" aria-label="Play" title="Play / pause  Space"><svg><use href="#i-play"/></svg></button>
       <button class="glass round" id="b-next" aria-label="Next" title="Next  →"><svg><use href="#i-next"/></svg></button>
     </div>
-    <div id="search" class="glass">
-      <svg aria-hidden="true"><use href="#i-search"/></svg>
-      <input id="q" type="search" placeholder="Search a song, or paste a link" autocomplete="off" spellcheck="false" aria-label="Search songs or paste a link" aria-controls="results">
-      <ul id="results" class="glass" role="listbox" hidden></ul>
-    </div>
-    <button id="sp-login" class="glass pill" type="button"><svg aria-hidden="true"><use href="#i-spotify"/></svg><span>Log in with Spotify</span></button>
     <div id="lyrics" hidden><div class="lines"></div></div>
   </main>
 
