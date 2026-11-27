@@ -199,15 +199,18 @@ function renderStatus() {
   badge($('#lf-badge'), status.local, { idle: ['idle', ''], ready: ['loaded', 'ok'], error: ['error', 'bad'] });
   $('#sp-login').hidden = spotify.connected;
   if (spotify.connected && spotify.user) {
-    $('#sp-hint').textContent = spotify.user.premium && spotify.sdkFailed
+    $('#sp-hint').textContent = spotify.user.premium && spotify.sdkHelp
       ? `Logged in as ${spotify.user.name}. ${spotify.sdkHelp} Until then, songs start in your Spotify app and the turntable follows.`
       : spotify.user.premium
       ? `Logged in as ${spotify.user.name}. Search plays full songs here, or play from any Spotify app and the turntable follows.`
       : `Logged in as ${spotify.user.name}. Playing inside the browser needs Premium; play from any Spotify app and the turntable follows.`;
+  } else if (spotify.connected && spotify.sdkHelp) {
+    $('#sp-hint').textContent = `${spotify.sdkHelp} Until then, songs start in your Spotify app and the turntable follows.`;
   }
   $('#sp-setup').hidden = spotify.connected;
   $('#sp-connected').hidden = !spotify.connected;
   $('#sp-here').disabled = !spotify.deviceId;
+  $('#sp-drm').hidden = spotify.sdkError !== 'drm';
 }
 
 // ---------- lyrics ----------
@@ -580,6 +583,11 @@ function buildSheets() {
   });
   $('#sp-form').addEventListener('submit', (e) => { e.preventDefault(); spotify.clientId = $('#sp-client').value; run(() => spotify.login()); });
   $('#sp-here').addEventListener('click', () => spotify.prime() || run(async () => { activate(spotify); spotify.start(); await spotify.playHere(); }));
+  $('#sp-drm').addEventListener('click', () => run(async () => {
+    const ok = await spotify.requestDrm();
+    toast(ok ? 'Protected playback allowed. Starting the player.' : 'The browser did not allow it. Turn on DRM in its settings, then reload.', !ok);
+    renderStatus();
+  }));
   $('#sp-out').addEventListener('click', () => { spotify.logout(); if (active === spotify) { active = null; state.track = null; onTrackChange(); } renderStatus(); });
   for (const [label, url] of [['lofi hip hop radio', 'https://www.youtube.com/watch?v=jfKfPfyJRdk'], ['jazz café', 'https://www.youtube.com/watch?v=Dx5qFachd3A']]) {
     const c = document.createElement('button');

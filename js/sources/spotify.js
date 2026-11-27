@@ -81,6 +81,7 @@ export class SpotifySource {
       access: j.access_token,
       refresh: j.refresh_token || prev.refresh,
       expires: Date.now() + (j.expires_in - 60) * 1000,
+      scope: j.scope ?? prev.scope,      // what the user actually granted; the player needs "streaming"
     });
   }
 
@@ -105,7 +106,17 @@ export class SpotifySource {
     });
     if (res.status === 204) return null;
     if (res.status === 401) { this.logout(); throw new Error('Spotify session ended. Connect again.'); }
-    if (res.status === 403) throw new Error('Spotify needs Premium for playback control.');
+    if (res.status === 403) {
+      // 403 is not only "no Premium": Spotify also uses it for commands that do not fit the player's
+      // state right now (resume while playing, skip where skipping is not allowed): RESTRICTION_VIOLATED
+      let reason = '';
+      try { const j = await res.json(); reason = j?.error?.reason || j?.error?.message || ''; } catch { /* no body */ }
+      const e = new Error(reason === 'PREMIUM_REQUIRED' ? 'Spotify needs Premium for playback control.'
+        : /RESTRICTION/i.test(reason) ? 'Spotify did not allow that right now. Try again in a moment.'
+        : `Spotify refused the request${reason ? ` (${reason})` : ''}.`);
+      e.status = 403; e.reason = reason;
+      throw e;
+    }
     if (res.status === 429) throw new Error('Spotify rate limit. Slowing down.');
     if (!res.ok) {
       let reason = '';
@@ -138,7 +149,24 @@ export class SpotifySource {
   }
 
   // Browsers block audio until a user gesture: call this synchronously inside the click handler.
-  prime() { try { this.player?.activateElement?.(); } catch { /* older SDK */ } }
+  // The same gesture lets Firefox and its forks show their "allow DRM content" prompt.
+  prime() {
+    try { this.player?.activateElement?.(); } catch { /* older SDK */ }
+    if (this.sdkError === 'drm') this.requestDrm();
+  }
+
+  // Ask the browser for protected playback. Call it from a click: Firefox-family browsers answer with
+  // their DRM permission prompt. Once allowed, the in-browser player starts without a reload.
+  async requestDrm() {
+    const ok = await this.drmAvailable();
+    if (ok && this.sdkError === 'drm') { this.resetSdk(); this.startSdk().catch(() => {}); }
+    return ok;
+  }
+
+  resetSdk() {
+    this.player?.disconnect();
+    Object.assign(this, { player: null, sdkPromise: null, sdkFailed: false, sdkError: null, deviceId: null, authRetried: false });
+  }
 
   start() {
     this.onStatus?.('spotify', 'connecting');
@@ -168,10 +196,13 @@ export class SpotifySource {
   get sdkHelp() {
     if (this.sdkError === 'drm') {
       return /firefox|zen|librewolf|floorp|waterfox/i.test(navigator.userAgent)
-        ? 'Protected playback (DRM) is off in this browser, so Spotify cannot play here. Turn on Settings → General → "Play DRM-controlled content", then reload. Chrome and Edge work out of the box.'
+        ? 'Protected playback (DRM) is off in this browser, so Spotify cannot play here. Press "Allow protected playback" in Sources → Spotify, or turn on Settings → General → "Play DRM-controlled content" and reload. Chrome and Edge work out of the box.'
         : 'This browser cannot play protected audio (DRM/Widevine), so Spotify cannot play here. In Brave, enable Widevine in Settings → Extensions. Chrome and Edge work out of the box.';
     }
     if (this.sdkError === 'premium') return 'Playing inside the browser needs Spotify Premium.';
+    if (this.sdkError === 'auth') {
+      return 'Spotify refused the in-browser player for this app. In the Spotify developer dashboard, open the app → Settings → APIs used, tick "Web Playback SDK", save, then log out and back in here. In Zen or Firefox with strict tracking protection, turn it off for this site from the shield in the address bar.';
+    }
     if (this.sdkError) return `The Spotify player could not start here (${this.sdkError}).`;
     return '';
   }
@@ -207,7 +238,19 @@ export class SpotifySource {
           reject(new Error('Premium required for in-browser playback.'));
         });
         player.addListener('initialization_error', ({ message }) => { this.sdkError = message || 'initialization error'; this.onStatus?.('spotify', 'remote'); reject(new Error(message)); });
-        player.addListener('authentication_error', ({ message }) => { this.sdkError = message || 'authentication error'; reject(new Error(message)); });
+        player.addListener('authentication_error', () => {
+          // first a fresh token and one reconnect: a token that lapsed between refreshes fails the same way
+          if (!this.authRetried) {
+            this.authRetried = true;
+            this.exchange({ grant_type: 'refresh_token', refresh_token: store.get(K.tok)?.refresh })
+              .then(() => { player.disconnect(); return player.connect(); })
+              .catch(() => { this.sdkError = 'auth'; this.onStatus?.('spotify', 'remote'); reject(new Error(this.sdkHelp)); });
+            return;
+          }
+          this.sdkError = 'auth';
+          this.onStatus?.('spotify', 'remote');
+          reject(new Error(this.sdkHelp));
+        });
         player.addListener('player_state_changed', (s) => this.fromSdk(s));
         player.connect().then((ok) => { if (!ok) { this.sdkError = 'connect refused'; reject(new Error('connect refused')); } });
       };
@@ -334,20 +377,33 @@ export class SpotifySource {
     setTimeout(() => this.poll(), 400);
   }
 
+  // Remote control of whatever the account is playing (the desktop or phone app). Ask the account for
+  // its state first: this screen's idea of play/pause can be a few seconds old, and resuming must stay
+  // on the device that holds the song instead of pulling it into the browser.
   async toggle(playing) {
     if (this.sdkActive && this.player) return this.player.togglePlay();
-    if (playing) await this.api('/me/player/pause', { method: 'PUT' });
-    else await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT' }));
+    const now = await this.api('/me/player').catch(() => null);
+    const isPlaying = now ? !!now.is_playing : playing;
+    await this.command(async () => {
+      if (isPlaying) await this.api('/me/player/pause', { method: 'PUT' });
+      else if (now?.device?.id) await this.api(`/me/player/play?device_id=${now.device.id}`, { method: 'PUT' });
+      else await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT' }));
+    });
     setTimeout(() => this.poll(), 400);
   }
   async next() {
     if (this.sdkActive && this.player) return this.player.nextTrack();
-    await this.api('/me/player/next', { method: 'POST' });
+    await this.command(() => this.api('/me/player/next', { method: 'POST' }));
     setTimeout(() => this.poll(), 500);
   }
   async prev() {
     if (this.sdkActive && this.player) return this.player.previousTrack();
-    await this.api('/me/player/previous', { method: 'POST' });
+    await this.command(() => this.api('/me/player/previous', { method: 'POST' }));
     setTimeout(() => this.poll(), 500);
+  }
+  // a command that no longer fits the player's state (it changed in the app meanwhile) is not an
+  // error worth showing: the next poll brings the screen up to date
+  async command(fn) {
+    try { await fn(); } catch (e) { if (!/RESTRICTION/i.test(e.reason || '')) throw e; }
   }
 }
