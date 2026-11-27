@@ -235,7 +235,7 @@ body.yt-panel #yt-slot { display: block; width: 100%; max-width: 26rem; aspect-r
 }
 #yt-card.ghost #yt-mount { border-radius: 0; }
 @keyframes ghost-in { from { opacity: 0; } }
-.yt-opts { margin-top: .8rem; flex-direction: column; align-items: flex-start; gap: .6rem; }
+.toggles.yt-opts { margin-top: .8rem; flex-direction: column; align-items: flex-start; gap: .6rem; }
 .yt-grip { height: 16px; flex: none; display: grid; place-items: center; cursor: grab; touch-action: none; }
 .yt-grip i { width: 34px; height: 4px; border-radius: 4px; background: var(--ink-3); opacity: .6; }
 #yt-card.dragging .yt-grip { cursor: grabbing; }
