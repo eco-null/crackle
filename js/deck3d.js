@@ -524,8 +524,7 @@ export class Turntable {
     this.renderer.toneMappingExposure = 1.02;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.VSMShadowMap;
-    this.renderer.shadowMap.autoUpdate = false;    // see shadowsDirty(): redrawn only when casters move
-    this.renderer.shadowMap.needsUpdate = true;
+    this.renderer.shadowMap.autoUpdate = true;     // gated per light in loop(): each map is redrawn only when needed
     this.maxAniso = this.renderer.capabilities.getMaxAnisotropy();
 
     this.scene = new THREE.Scene();
@@ -1439,7 +1438,15 @@ export class Turntable {
     const step = Math.min(.1, this.held);
     this.held = 0;
     this.step(step);
-    if (this.shadowsDirty()) this.renderer.shadowMap.needsUpdate = true;
+    // Shadows are redrawn per light. The key light's large map follows shadowsDirty() (casters that
+    // actually moved). The stylus lamp sits low and close, so its long shadow of the arm magnifies the
+    // arm's slow tracking and its once-per-turn sway: its small map is redrawn every frame the arm moves.
+    const key = this.key.shadow, lamp = this.lampLight.shadow;
+    key.autoUpdate = lamp.autoUpdate = false;
+    if (this.shadowsDirty()) key.needsUpdate = lamp.needsUpdate = true;
+    const arm = [this.armYaw.rotation.y, this.armPitch.rotation.z, this.lampLight.target.position.x, this.lampLight.target.position.z, this.lampLight.position.y];
+    if (this.lampLevel > .003 && (!this.armSig || arm.some((v, i) => Math.abs(v - this.armSig[i]) > 1e-7))) lamp.needsUpdate = true;
+    this.armSig = arm;
     this.render();
     if (!document.hidden && !this.noAdapt && this.busy) this.adapt(step);
   }

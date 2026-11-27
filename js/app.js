@@ -400,12 +400,13 @@ function choose(i) {
   const r = results[i];
   if (!r) return;
   const list = results.filter((x) => x.source === 'preview');
+  const radio = results.filter((x) => x.source === 'spotify').map((x) => x.uri);   // what plays after it
   closeResults();
   $('#q').value = '';
   $('#q').blur();
   if (r.source === 'spotify') {
     spotify.prime();
-    run(async () => { activate(spotify); spotify.start(); await spotify.playUri(r.uri); });
+    run(async () => { activate(spotify); spotify.start(); await spotify.playUri(r.uri, radio); });
   } else if (r.source === 'youtube') {
     run(async () => { activate(youtube); await youtube.load(r.id); });
   } else {

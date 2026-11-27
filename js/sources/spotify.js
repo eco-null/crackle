@@ -365,6 +365,7 @@ export class SpotifySource {
     this.sdkActive = true;
     this.lastSdkAt = Date.now();
     const t = s.track_window.current_track;
+    this.feedRadio(t.linked_from?.uri || t.uri, (t.artists || []).map((a) => a.name).join(', '));
     this.onState(this.mapTrack({
       id: t.id || t.uri, name: t.name, artists: t.artists, album: t.album, duration_ms: s.duration,
     }, { playing: !s.paused, position: s.position, device: 'this screen' }));
@@ -388,6 +389,7 @@ export class SpotifySource {
           // follow volume changes made in the Spotify app
           if (typeof p.device?.volume_percent === 'number' && p.device.id !== this.deviceId) this.onVolume?.(p.device.volume_percent / 100);
           this.onState(this.mapTrack(p.item, { playing: p.is_playing, position: p.progress_ms, device: p.device?.name || '' }));
+          this.feedRadio(p.item.linked_from?.uri || p.item.uri, (p.item.artists || []).map((a) => a.name).join(', '));
         } else {
           this.onStatus?.('spotify', 'idle');
           this.onState({ source: 'spotify', track: null, playing: false, position: 0 });
@@ -432,9 +434,36 @@ export class SpotifySource {
   }
 
   // Plays on this screen when the Web Playback SDK is ready, otherwise on the account's active device.
-  async playUri(uri) {
-    await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: [uri] } }));
+  // Spotify plays a list of tracks and stops at its end. Crackle keeps a radio going instead: the
+  // chosen song, then the other results of the same search, and before that runs out it queues more
+  // songs around the artist now playing (the recommendation endpoints are closed to apps like this).
+  async playUri(uri, more = []) {
+    const list = [uri, ...more.filter((u) => u && u !== uri)].slice(0, 12);
+    this.radio = { order: list, seen: new Set(list), extending: false };
+    await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: list } }));
     setTimeout(() => this.poll(), 600);
+  }
+
+  // called on every track change: two songs before the radio runs dry, queue more
+  async feedRadio(uri, artist) {
+    const r = this.radio;
+    if (!r || r.extending || !uri) return;
+    const at = r.order.indexOf(uri);
+    if (at < 0 || at < r.order.length - 2) return;
+    r.extending = true;
+    try {
+      const name = (artist || '').split(',')[0].trim();
+      const found = [...await this.search(`artist:"${name}"`).catch(() => []), ...await this.search(name).catch(() => [])];
+      const add = [...new Set(found.map((x) => x.uri))].filter((u) => !r.seen.has(u)).slice(0, 6);
+      for (const u of add) {
+        await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' });
+        r.seen.add(u); r.order.push(u);
+      }
+    } catch (e) {
+      console.warn('[crackle] could not extend the radio', e.message);
+    } finally {
+      r.extending = false;
+    }
   }
 
   // In the browser the SDK player's own level; when following the account, the playing device's
