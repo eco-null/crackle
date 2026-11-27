@@ -1,0 +1,322 @@
+// Spotify: Authorization Code + PKCE in the browser (no server, no secret).
+// Two modes, picked automatically:
+//  - "here": Web Playback SDK turns this page into a Spotify Connect device (Premium).
+//  - "remote": mirrors whatever is playing on the account (phone, desktop) by polling.
+
+import { SPOTIFY_CLIENT_ID } from '../config.js';
+
+const AUTH = 'https://accounts.spotify.com/authorize';
+const TOKEN = 'https://accounts.spotify.com/api/token';
+const API = 'https://api.spotify.com/v1';
+const SCOPES = [
+  'streaming', 'user-read-email', 'user-read-private',
+  'user-read-playback-state', 'user-modify-playback-state', 'user-read-currently-playing',
+].join(' ');
+const K = { client: 'vinyl.spotify.client', tok: 'vinyl.spotify.token', ver: 'vinyl.spotify.verifier' };
+
+const store = {
+  get: (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+  del: (k) => { try { localStorage.removeItem(k); } catch { /* ignore */ } },
+};
+
+// the same page can be opened as /crackle/ or /crackle/index.html: Spotify needs one exact address
+const redirectUri = () => location.origin + location.pathname.replace(/index\.html$/, '');
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+export class SpotifySource {
+  constructor({ onState, onStatus }) {
+    this.id = 'spotify';
+    this.onState = onState;
+    this.onStatus = onStatus;
+    this.deviceId = null;
+    this.sdkActive = false;
+    this.lastSdkAt = 0;
+    this.pollTimer = null;
+  }
+
+  get clientId() { return store.get(K.client) || SPOTIFY_CLIENT_ID || ''; }
+  set clientId(v) { store.set(K.client, (v || '').trim()); }
+  get connected() { return !!store.get(K.tok); }
+  get redirectUri() { return redirectUri(); }
+
+  async login() {
+    if (!/^[0-9a-f]{32}$/i.test(this.clientId)) throw new Error('Add a valid Spotify client ID first.');
+    const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+    const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+    store.set(K.ver, verifier);
+    const q = new URLSearchParams({
+      client_id: this.clientId, response_type: 'code', redirect_uri: redirectUri(),
+      code_challenge_method: 'S256', code_challenge: challenge, scope: SCOPES,
+    });
+    location.assign(`${AUTH}?${q}`);
+  }
+
+  // Finish the redirect if this page load carries ?code=. Returns true when tokens were stored.
+  async handleRedirect() {
+    const url = new URL(location.href);
+    const code = url.searchParams.get('code');
+    const err = url.searchParams.get('error');
+    if (!code && !err) return false;
+    url.searchParams.delete('code'); url.searchParams.delete('error'); url.searchParams.delete('state');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+    if (err) throw new Error(`Spotify sign-in was cancelled (${err}).`);
+    const verifier = store.get(K.ver);
+    store.del(K.ver);
+    if (!verifier) throw new Error('Spotify sign-in expired. Try again.');
+    await this.exchange({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: verifier });
+    return true;
+  }
+
+  async exchange(params) {
+    const res = await fetch(TOKEN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: this.clientId, ...params }),
+    });
+    if (!res.ok) throw new Error(`Spotify token request failed (${res.status}).`);
+    const j = await res.json();
+    const prev = store.get(K.tok) || {};
+    store.set(K.tok, {
+      access: j.access_token,
+      refresh: j.refresh_token || prev.refresh,
+      expires: Date.now() + (j.expires_in - 60) * 1000,
+    });
+  }
+
+  async token() {
+    const t = store.get(K.tok);
+    if (!t) throw new Error('Not connected to Spotify.');
+    if (Date.now() < t.expires) return t.access;
+    try {
+      await this.exchange({ grant_type: 'refresh_token', refresh_token: t.refresh });
+    } catch (e) {
+      this.logout();
+      throw e;
+    }
+    return store.get(K.tok).access;
+  }
+
+  async api(path, { method = 'GET', body } = {}) {
+    const res = await fetch(API + path, {
+      method,
+      headers: { Authorization: `Bearer ${await this.token()}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (res.status === 204) return null;
+    if (res.status === 401) { this.logout(); throw new Error('Spotify session ended. Connect again.'); }
+    if (res.status === 403) throw new Error('Spotify needs Premium for playback control.');
+    if (res.status === 429) throw new Error('Spotify rate limit. Slowing down.');
+    if (!res.ok) {
+      let reason = '';
+      try { const j = await res.json(); reason = j?.error?.reason || j?.error?.message || ''; } catch { /* no body */ }
+      const e = new Error(res.status === 404
+        ? 'No Spotify device is ready. Open Spotify on any device, or wait a second and try again.'
+        : `Spotify request failed (${res.status}${reason ? `: ${reason}` : ''}).`);
+      e.status = res.status; e.reason = reason;
+      throw e;
+    }
+    const text = await res.text();
+    // some player endpoints answer 200 with a plain-text body instead of JSON or 204
+    try { return text ? JSON.parse(text) : null; } catch { return null; }
+  }
+
+  logout() {
+    store.del(K.tok);
+    this.stop();
+    this.player?.disconnect();
+    this.player = null;
+    this.sdkActive = false;
+    this.onStatus?.('spotify', 'disconnected');
+  }
+
+  // Load the in-browser player as soon as an account is connected, so a device exists before the
+  // first play request (a play request without a device is answered with 404 NO_ACTIVE_DEVICE).
+  warm() {
+    if (!this.connected) return;
+    this.startSdk().catch(() => { /* remote mode still works */ });
+  }
+
+  // Browsers block audio until a user gesture: call this synchronously inside the click handler.
+  prime() { try { this.player?.activateElement?.(); } catch { /* older SDK */ } }
+
+  start() {
+    this.onStatus?.('spotify', 'connecting');
+    if (!this.user) this.api('/me').then((me) => { this.user = { name: me?.display_name || me?.id || '', premium: me?.product === 'premium' }; this.onStatus?.('spotify', 'profile'); }).catch(() => {});
+    this.startSdk().catch(() => { /* remote mode still works */ });
+    this.poll();
+  }
+
+  stop() {
+    clearTimeout(this.pollTimer);
+    this.pollTimer = null;
+  }
+
+  // --- Web Playback SDK ---
+  startSdk() {
+    if (this.sdkPromise) return this.sdkPromise;
+    this.sdkPromise = new Promise((resolve, reject) => {
+      window.onSpotifyWebPlaybackSDKReady = () => {
+        const player = new window.Spotify.Player({
+          name: 'Crackle',
+          getOAuthToken: (cb) => this.token().then(cb).catch(() => {}),
+          volume: 0.8,
+        });
+        this.player = player;
+        player.addListener('ready', ({ device_id }) => {
+          this.deviceId = device_id;
+          this.onStatus?.('spotify', 'ready');
+          resolve();
+        });
+        player.addListener('not_ready', () => { this.deviceId = null; });
+        player.addListener('account_error', () => {
+          this.onStatus?.('spotify', 'remote');
+          reject(new Error('Premium required for in-browser playback.'));
+        });
+        player.addListener('initialization_error', ({ message }) => { this.onStatus?.('spotify', 'remote'); reject(new Error(message)); });
+        player.addListener('authentication_error', ({ message }) => reject(new Error(message)));
+        player.addListener('player_state_changed', (s) => this.fromSdk(s));
+        player.connect();
+      };
+      if (!document.querySelector('script[data-spotify-sdk]')) {
+        const s = document.createElement('script');
+        s.src = 'https://sdk.scdn.co/spotify-player.js';
+        s.dataset.spotifySdk = '1';
+        s.onerror = () => reject(new Error('Could not load the Spotify player.'));
+        document.head.appendChild(s);
+      } else if (window.Spotify) {
+        window.onSpotifyWebPlaybackSDKReady();
+      }
+    });
+    this.sdkPromise.catch(() => { this.sdkFailed = true; });
+    return this.sdkPromise;
+  }
+
+  // Resolves with this screen's device id, or null when the in-browser player is unavailable.
+  async readyDevice(ms = 8000) {
+    if (this.deviceId) return this.deviceId;
+    if (this.sdkFailed) return null;
+    await Promise.race([this.startSdk().catch(() => {}), new Promise((r) => setTimeout(r, ms))]);
+    return this.deviceId;
+  }
+
+  // Picks where to play: this screen first, then the account's active device, then any device.
+  async targetDevice() {
+    const here = await this.readyDevice();
+    if (here) return here;
+    const list = (await this.api('/me/player/devices'))?.devices || [];
+    const d = list.find((x) => x.is_active) || list.find((x) => !x.is_restricted);
+    if (!d) throw new Error('No Spotify device found. Open Spotify on your phone or computer, or use Premium to play here.');
+    return d.id;
+  }
+
+  // A freshly registered device can take a moment to appear in the Web API: retry the 404 briefly.
+  async withDevice(fn) {
+    const id = await this.targetDevice();
+    for (let i = 0; ; i++) {
+      try { return await fn(id); } catch (e) {
+        if (e.status !== 404 || i >= 3) throw e;
+        if (i === 0) await this.api('/me/player', { method: 'PUT', body: { device_ids: [id], play: false } }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 600 + i * 500));
+      }
+    }
+  }
+
+  fromSdk(s) {
+    if (!s || !s.track_window?.current_track) { this.sdkActive = false; return; }
+    this.sdkActive = true;
+    this.lastSdkAt = Date.now();
+    const t = s.track_window.current_track;
+    this.onState(this.mapTrack({
+      id: t.id || t.uri, name: t.name, artists: t.artists, album: t.album, duration_ms: s.duration,
+    }, { playing: !s.paused, position: s.position, device: 'this screen' }));
+  }
+
+  async playHere() {
+    const id = await this.readyDevice();
+    if (!id) throw new Error('This browser cannot play Spotify. Play from your phone and Crackle will follow.');
+    await this.api('/me/player', { method: 'PUT', body: { device_ids: [id], play: true } });
+  }
+
+  // --- remote mode ---
+  async poll() {
+    clearTimeout(this.pollTimer);
+    let delay = 3000;
+    try {
+      if (!this.sdkActive || Date.now() - this.lastSdkAt > 8000) {
+        const p = await this.api('/me/player?additional_types=episode');
+        if (p && p.item) {
+          this.onStatus?.('spotify', p.device?.id && p.device.id === this.deviceId ? 'ready' : 'remote');
+          this.onState(this.mapTrack(p.item, { playing: p.is_playing, position: p.progress_ms, device: p.device?.name || '' }));
+        } else {
+          this.onStatus?.('spotify', 'idle');
+          this.onState({ source: 'spotify', track: null, playing: false, position: 0 });
+          delay = 5000;
+        }
+      }
+    } catch (e) {
+      if (!this.connected) return;
+      delay = 10000;
+      this.onStatus?.('spotify', 'error', e.message);
+    }
+    this.pollTimer = setTimeout(() => this.poll(), document.hidden ? 15000 : delay);
+  }
+
+  mapTrack(item, { playing, position, device }) {
+    const album = item.album || item.show || {};
+    const images = album.images || item.images || [];
+    const art = images.length ? images[0].url : '';
+    return {
+      source: 'spotify',
+      track: {
+        id: item.id || item.uri,
+        title: item.name || '',
+        artist: (item.artists || []).map((a) => a.name).join(', ') || item.show?.publisher || '',
+        album: album.name || '',
+        albumKey: album.uri || album.name || item.id,
+        art: art.startsWith('https://') ? art : '',
+        duration: item.duration_ms || 0,
+      },
+      playing: !!playing,
+      position: position || 0,
+      device,
+    };
+  }
+
+  async search(q) {
+    const j = await this.api(`/search?type=track&limit=7&q=${encodeURIComponent(q)}`);
+    return (j?.tracks?.items || []).map((t) => ({
+      source: 'spotify', uri: t.uri, title: t.name, artist: t.artists.map((a) => a.name).join(', '),
+      album: t.album?.name || '', art: t.album?.images?.[0]?.url || '', thumb: t.album?.images?.at(-1)?.url || '',
+    }));
+  }
+
+  // Plays on this screen when the Web Playback SDK is ready, otherwise on the account's active device.
+  async playUri(uri) {
+    await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: [uri] } }));
+    setTimeout(() => this.poll(), 600);
+  }
+
+  async seek(ms) {
+    if (this.sdkActive && this.player) return this.player.seek(Math.round(ms));
+    await this.api(`/me/player/seek?position_ms=${Math.round(ms)}`, { method: 'PUT' });
+    setTimeout(() => this.poll(), 400);
+  }
+
+  async toggle(playing) {
+    if (this.sdkActive && this.player) return this.player.togglePlay();
+    if (playing) await this.api('/me/player/pause', { method: 'PUT' });
+    else await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT' }));
+    setTimeout(() => this.poll(), 400);
+  }
+  async next() {
+    if (this.sdkActive && this.player) return this.player.nextTrack();
+    await this.api('/me/player/next', { method: 'POST' });
+    setTimeout(() => this.poll(), 500);
+  }
+  async prev() {
+    if (this.sdkActive && this.player) return this.player.previousTrack();
+    await this.api('/me/player/previous', { method: 'POST' });
+    setTimeout(() => this.poll(), 500);
+  }
+}

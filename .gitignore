@@ -1,0 +1,7 @@
+assets/raw/
+assets/raw2/
+assets/raw3/
+.claude/
+node_modules/
+.DS_Store
+Thumbs.db

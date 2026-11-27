@@ -1,0 +1,9 @@
+{
+  "name": "crackle",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A photoreal turntable for the big screen. Spotify, YouTube and your own files, with synced lyrics.",
+  "type": "module",
+  "scripts": { "start": "node serve.mjs" },
+  "license": "MIT"
+}
