@@ -65,7 +65,7 @@ With Spotify it works like the app:
 - **Your library in the search box.** Click into it with nothing typed and your playlists, saved albums and Liked Songs are there; typing finds them first, then songs, artists, albums and playlists.
 - **Links.** Paste any Spotify link (song, album, playlist, artist) or a YouTube link and it plays.
 - **A queue.** Right-click a result, press its **+** or Shift+Enter to add it; the queue button in the dock (or Q) shows what plays next. Next skips to the queue first.
-- **It keeps playing.** When an album, a playlist or a single song runs out, more songs around the artist follow, so the music doesn't stop.
+- **It keeps playing.** When a song, an album or a playlist runs out, Spotify's own autoplay carries on with its recommendations, as in the app (Spotify settings → Playback → Autoplay).
 
 Accounts connected before the library arrived need to connect once more to show their playlists.
 

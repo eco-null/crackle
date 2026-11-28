@@ -381,11 +381,6 @@ export class SpotifySource {
     this.sdkActive = true;
     this.lastSdkAt = Date.now();
     const t = s.track_window.current_track;
-    // the player reports changes, not time passing: check again half a minute before the end
-    const left = s.duration - s.position;
-    clearTimeout(this.keepTimer);
-    if (!s.paused && left > 30000) this.keepTimer = setTimeout(() => this.keepPlaying(t, 29000, true), left - 29500);
-    this.keepPlaying(t, left, !s.paused, s.track_window.next_tracks?.length);
     this.onState(this.mapTrack({
       id: t.id || t.uri, name: t.name, artists: t.artists, album: t.album, duration_ms: s.duration,
     }, { playing: !s.paused, position: s.position, device: 'this screen' }));
@@ -409,7 +404,6 @@ export class SpotifySource {
           // follow volume changes made in the Spotify app
           if (typeof p.device?.volume_percent === 'number' && p.device.id !== this.deviceId) this.onVolume?.(p.device.volume_percent / 100);
           this.onState(this.mapTrack(p.item, { playing: p.is_playing, position: p.progress_ms, device: p.device?.name || '' }));
-          this.keepPlaying(p.item, (p.item.duration_ms || 0) - (p.progress_ms || 0), p.is_playing);
         } else {
           this.onStatus?.('spotify', 'idle');
           this.onState({ source: 'spotify', track: null, playing: false, position: 0 });
@@ -504,8 +498,10 @@ export class SpotifySource {
 
   // ---------- playing ----------
   // Plays on this screen when the Web Playback SDK is ready, otherwise on the account's active device.
+  // What comes after a song, an album or a playlist is Spotify's own: its autoplay continues with its
+  // recommendations, as in the app (Settings → Playback → Autoplay). Spotify's recommendation endpoints
+  // are closed to apps like this one, so nothing here picks songs.
   async playUri(uri) {
-    this.seen = new Set([uri]);
     await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: [uri] } }));
     setTimeout(() => this.poll(), 600);
   }
@@ -513,7 +509,6 @@ export class SpotifySource {
   // an album, playlist or artist as Spotify plays it (in order, then on); Liked Songs as its first fifty
   async playItem(item) {
     if (item.kind === 'track' || item.kind === 'episode' || !item.kind) return this.playUri(item.uri);
-    this.seen = new Set();
     if (item.kind === 'liked') {
       const uris = await this.tracksOf(item);
       if (!uris.length) throw new Error('No liked songs yet.');
@@ -534,42 +529,6 @@ export class SpotifySource {
     const uris = await this.tracksOf(item, 30);
     for (const u of uris) await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' });
     return uris.length;
-  }
-
-  // Never stop, like the app: half a minute before the end of a song, if nothing is lined up after it
-  // (the end of an album, a playlist or a single song), queue a few songs around the artist playing.
-  // Spotify's recommendation and radio endpoints are closed to apps like this one, so the songs come
-  // from the artist and from searches on them. Checked once per song.
-  async keepPlaying(item, remaining, playing, nextKnown) {
-    const uri = item?.linked_from?.uri || item?.uri;
-    if (!uri || !playing || !(remaining < 30000) || this.keepChecked === uri || this.keeping) return;
-    this.keepChecked = uri;
-    this.keeping = true;
-    try {
-      this.seen = this.seen || new Set();
-      this.seen.add(uri);
-      const lined = nextKnown ?? (await this.queue().catch(() => [])).length;
-      if (lined > 0) return;
-      const artists = (item.artists || []).map((a) => a.name).filter(Boolean);
-      const pool = [];
-      for (const q of [`artist:"${artists[0]}"`, artists.slice(0, 2).join(' '), item.album?.name ? `${artists[0]} ${item.album.name}` : '']) {
-        if (!q || !artists[0]) continue;
-        pool.push(...((await this.search(q).catch(() => null))?.tracks || []));
-      }
-      const names = new Set([String(item.name).toLowerCase()]);
-      const pick = [];
-      for (const t of pool.sort(() => Math.random() - .5)) {
-        const n = t.title.toLowerCase();
-        if (this.seen.has(t.uri) || names.has(n)) continue;
-        names.add(n); pick.push(t.uri);
-        if (pick.length >= 4) break;
-      }
-      for (const u of pick) { await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' }); this.seen.add(u); }
-    } catch (e) {
-      console.warn('[crackle] could not keep the music going', e.message);
-    } finally {
-      this.keeping = false;
-    }
   }
 
   // In the browser the SDK player's own level; when following the account, the playing device's
