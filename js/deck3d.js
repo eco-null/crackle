@@ -1076,17 +1076,20 @@ export class Turntable {
     ao.setSize = (w, h) => { size(w, h); this.aoDirty = true; };
   }
 
-  // how far the view moved since `from`, in screen pixels (position and aim; a rough measure)
+  // How far the picture moved since `from`, in drawn pixels: the camera's position and aim, and the
+  // framing. The deck's region on the page (the idle layout, an open panel) shifts the picture through
+  // the view offset alone, with the camera standing still, so that counts as much as a camera move.
   viewShift(from) {
     if (!from) return Infinity;
-    const cam = this.camera, e = cam.matrixWorld.elements;
+    const cam = this.camera, e = cam.matrixWorld.elements, v = this.viewFrame, pr = this.renderer.getPixelRatio();
     const dist = cam.position.distanceTo(this.camTarget || cam.position);
     const pxPerCm = this.renderer.domElement.height / (2 * Math.max(1, dist) * Math.tan(cam.fov * Math.PI / 360));
     const dp = Math.hypot(e[12] - from[0], e[13] - from[1], e[14] - from[2]);
     const dd = Math.hypot(e[8] - from[3], e[9] - from[4], e[10] - from[5]) * dist;
-    return (dp + dd) * pxPerCm;
+    const frame = (Math.hypot(v[0] - from[6], v[1] - from[7]) + Math.abs(v[2] - from[8]) + Math.abs(v[3] - from[9])) * pr;
+    return (dp + dd) * pxPerCm + frame;
   }
-  viewSig() { const e = this.camera.matrixWorld.elements; return [e[12], e[13], e[14], e[8], e[9], e[10]]; }
+  viewSig() { const e = this.camera.matrixWorld.elements, v = this.viewFrame; return [e[12], e[13], e[14], e[8], e[9], e[10], v[0], v[1], v[2], v[3]]; }
 
   // AO is redrawn for real moves at once, for the slow ones (drift, arm tracking) a few times a second
   aoCheck() {
@@ -2021,6 +2024,7 @@ export class Turntable {
     this.camera.aspect = W / H;
     this.camera.near = Math.max(6, dist * .3);   // tight near plane keeps the label free of z-fighting
     this.camera.setViewOffset(W, H, W / 2 - (reg.x + reg.w / 2), H / 2 - (reg.y + reg.h / 2), W, H);
+    this.viewFrame = [this.camera.view.offsetX, this.camera.view.offsetY, W, H];   // before any sub-pixel jitter
     this.camera.updateProjectionMatrix();
   }
 
