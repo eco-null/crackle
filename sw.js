@@ -7,7 +7,7 @@ const CACHE = 'crackle-v1';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/deck3d.js', 'js/materials.js', 'js/config.js', 'js/lyrics.js',
-  'js/sources/spotify.js', 'js/sources/youtube.js', 'js/sources/local.js',
+  'js/sources/spotify.js', 'js/sources/youtube.js', 'js/sources/local.js', 'js/sources/radio.js',
   'assets/mark.svg', 'assets/icon-192.png', 'assets/icon-512.png',
 ];
 const IMMUTABLE = /^https:\/\/(cdn\.jsdelivr\.net|dl\.polyhaven\.org|fonts\.(googleapis|gstatic)\.com)\//;

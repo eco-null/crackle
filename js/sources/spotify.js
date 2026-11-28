@@ -4,6 +4,7 @@
 //  - "remote": mirrors whatever is playing on the account (phone, desktop) by polling.
 
 import { SPOTIFY_CLIENT_ID } from '../config.js';
+import { radioFor } from './radio.js';
 
 const AUTH = 'https://accounts.spotify.com/authorize';
 const TOKEN = 'https://accounts.spotify.com/api/token';
@@ -381,6 +382,11 @@ export class SpotifySource {
     this.sdkActive = true;
     this.lastSdkAt = Date.now();
     const t = s.track_window.current_track;
+    // the player reports changes, not time passing: look again half a minute before the end
+    const left = s.duration - s.position;
+    clearTimeout(this.keepTimer);
+    if (!s.paused && left > 30000) this.keepTimer = setTimeout(() => this.keepPlaying(t, 29000, true), left - 29500);
+    this.keepPlaying(t, left, !s.paused, s.track_window.next_tracks?.length);
     this.onState(this.mapTrack({
       id: t.id || t.uri, name: t.name, artists: t.artists, album: t.album, duration_ms: s.duration,
     }, { playing: !s.paused, position: s.position, device: 'this screen' }));
@@ -404,6 +410,7 @@ export class SpotifySource {
           // follow volume changes made in the Spotify app
           if (typeof p.device?.volume_percent === 'number' && p.device.id !== this.deviceId) this.onVolume?.(p.device.volume_percent / 100);
           this.onState(this.mapTrack(p.item, { playing: p.is_playing, position: p.progress_ms, device: p.device?.name || '' }));
+          this.keepPlaying(p.item, (p.item.duration_ms || 0) - (p.progress_ms || 0), p.is_playing);
         } else {
           this.onStatus?.('spotify', 'idle');
           this.onState({ source: 'spotify', track: null, playing: false, position: 0 });
@@ -498,9 +505,7 @@ export class SpotifySource {
 
   // ---------- playing ----------
   // Plays on this screen when the Web Playback SDK is ready, otherwise on the account's active device.
-  // What comes after a song, an album or a playlist is Spotify's own: its autoplay continues with its
-  // recommendations, as in the app (Settings → Playback → Autoplay). Spotify's recommendation endpoints
-  // are closed to apps like this one, so nothing here picks songs.
+  // When a song, an album or a playlist runs out, keepPlaying lines up more (see radio.js).
   async playUri(uri) {
     await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: [uri] } }));
     setTimeout(() => this.poll(), 600);
@@ -529,6 +534,42 @@ export class SpotifySource {
     const uris = await this.tracksOf(item, 30);
     for (const u of uris) await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' });
     return uris.length;
+  }
+
+  // Never stop, like the app: half a minute before the end of a song, if nothing is lined up after it,
+  // queue a few songs from the radio around the artist playing (Deezer's, see radio.js), each found on
+  // Spotify by title and artist. Looked at once per song; songs already played are not repeated.
+  async keepPlaying(item, remaining, playing, nextKnown) {
+    const uri = item?.linked_from?.uri || item?.uri;
+    if (!uri || !playing || !(remaining < 30000) || this.keepChecked === uri || this.keeping) return;
+    this.keepChecked = uri;
+    this.keeping = true;
+    const played = this.played || (this.played = new Set());
+    // a song is the same song live, remastered or as a radio edit: compare the bare title
+    const key = (title, artist) => `${artist.split(',')[0].trim()}|${title.replace(/\s*[([].*$/, '').replace(/\s+-\s+.*$/, '').trim()}`.toLowerCase();
+    const artists = (item.artists || []).map((a) => a.name).filter(Boolean);
+    played.add(key(item.name || '', artists[0] || ''));
+    try {
+      const lined = nextKnown ?? (await this.queue().catch(() => [])).length;
+      if (lined > 0) return;
+      const radio = await radioFor(artists[0]);
+      const added = [];
+      for (const t of radio) {
+        if (added.length >= 4) break;
+        const k = key(t.title, t.artist);
+        if (played.has(k)) continue;
+        const q = `track:"${t.title.replace(/"/g, '')}" artist:"${t.artist.replace(/"/g, '')}"`;
+        const hit = (await this.api(`/search?type=track&limit=1&q=${encodeURIComponent(q)}`).catch(() => null))?.tracks?.items?.[0];
+        if (!hit || hit.uri === uri) continue;
+        await this.api(`/me/player/queue?uri=${encodeURIComponent(hit.uri)}`, { method: 'POST' });
+        played.add(k); added.push(hit.uri);
+      }
+      if (played.size > 400) this.played = new Set([...played].slice(-200));
+    } catch (e) {
+      console.warn('[crackle] could not line up more music', e.message);
+    } finally {
+      this.keeping = false;
+    }
   }
 
   // In the browser the SDK player's own level; when following the account, the playing device's
