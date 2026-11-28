@@ -131,7 +131,7 @@ if (new URLSearchParams(location.search).has('debug')) {
       `calls    ${s.calls}   tris ${(s.tris / 1000).toFixed(0)}k`,
       `aa       ${tt.T.msaa ? 'msaa' + tt.T.msaa : tt.T.aa}${tt.accum.enabled ? `  accum ${tt.accum.n}/${tt.accum.max}` : ''}${tt.sharpen.enabled ? `  sharpen ${tt.sharpenAmount.toFixed(2)}` : ''}`,
       `ao       ${tt.ao.enabled ? per('ao') + '/s' : 'off'}   shadows ${per('shadows')}/s`,
-      `drawn    ${(drawn / sec).toFixed(1)}/s   resting ${drawn + rested ? Math.round(rested / (drawn + rested) * 100) : 0}%`,
+      `drawn    ${(drawn / sec).toFixed(1)}/s   resting ${drawn + rested ? Math.round(rested / (drawn + rested) * 100) : 0}%   dust only ${per('fx')}/s`,
       `build    ${s.build} ms   programs ${tt.renderer.info.programs?.length}`,
     ].join('\n');
     prev = { ...s }; at = now;

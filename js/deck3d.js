@@ -101,6 +101,8 @@ class GpuTimer {
   }
 }
 
+// adds light to the colour and leaves the canvas's alpha as it is (the page shows through around the deck)
+const ADD_LIGHT = { blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, blendSrcAlpha: THREE.ZeroFactor, blendDstAlpha: THREE.OneFactor };
 const halton = (i, b) => { let f = 1, r = 0; while (i > 0) { f /= b; r += f * (i % b); i = Math.floor(i / b); } return r; };
 const QUAD_VS = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.); }';
 
@@ -159,6 +161,43 @@ class AccumPass extends Pass {
     renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer); this.copy.render(renderer);
   }
   dispose() { for (const r of this.rt) r.dispose(); this.blend.dispose(); this.copy.dispose(); }
+}
+
+// The stylus lamp's beam and the dust in it are drawn last, over the finished frame. They are soft light
+// in the air with nothing to smooth, and the dust moves: the edge filter blurs the specks away, still-frame
+// accumulation smears them into trails, sharpening rings them. Drawn apart, they also let the deck rest
+// while the dust keeps drifting: only this pass runs again (draw()).
+// The pass is always last, so it puts the frame on screen itself and adds the light on top.
+class FxPass extends Pass {
+  constructor(deck) {
+    super();
+    this.deck = deck;
+    this.needsSwap = false;
+    this.copy = new FullScreenQuad(new THREE.ShaderMaterial({
+      uniforms: { t: { value: null } },
+      vertexShader: QUAD_VS,
+      fragmentShader: 'uniform sampler2D t; varying vec2 vUv; void main() { gl_FragColor = texture2D(t, vUv); }',
+      depthTest: false, depthWrite: false,
+    }));
+  }
+  render(renderer, writeBuffer, readBuffer) {
+    this.frame = readBuffer;
+    this.draw(renderer);
+  }
+  draw(renderer) {
+    const d = this.deck, cam = d.camera;
+    if (this.renderToScreen) {
+      this.copy.material.uniforms.t.value = this.frame.texture;
+      renderer.setRenderTarget(null); this.copy.render(renderer);
+    } else renderer.setRenderTarget(this.frame);
+    // the dust is drawn from the steady camera, without the sub-pixel jitter of accumulation
+    if (d.jittered) { cam.view.offsetX = d.viewBase.x; cam.view.offsetY = d.viewBase.y; cam.updateProjectionMatrix(); d.jittered = false; }
+    const auto = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.render(d.fxScene, cam);
+    renderer.autoClear = auto;
+  }
+  dispose() { this.copy.dispose(); }
 }
 
 // ---------- geometry constants (cm) ----------
@@ -763,9 +802,10 @@ export class Turntable {
     this.T = TIERS[this.tierAuto];
     this.scaleIx = 0;
     this.gpuTimer = new GpuTimer(this.renderer.getContext());
-    this.stats = { fps: 0, gpu: null, cpu: 0, calls: 0, tris: 0, ao: 0, shadows: 0, skipped: 0, drawn: 0 };
+    this.stats = { fps: 0, gpu: null, cpu: 0, calls: 0, tris: 0, ao: 0, shadows: 0, skipped: 0, drawn: 0, fx: 0 };
 
     this.scene = new THREE.Scene();
+    this.fxScene = new THREE.Scene();               // the lamp's beam and dust: drawn over the finished frame
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(reflectionRoom(), .02).texture;
     this.scene.environmentIntensity = 1;
@@ -805,7 +845,8 @@ export class Turntable {
     this.smaa = new SMAAPass(1, 1);
     this.fxaa = new ShaderPass(FXAAShader);
     this.sharpen = new ShaderPass(SharpenShader);
-    for (const pass of [this.accum, this.smaa, this.fxaa, this.sharpen]) { pass.enabled = false; this.composer.addPass(pass); }
+    this.fxPass = new FxPass(this);
+    for (const pass of [this.accum, this.smaa, this.fxaa, this.sharpen, this.fxPass]) { pass.enabled = false; this.composer.addPass(pass); }
     this.texLoader = new THREE.TextureLoader();
     this.textures = new Map();
 
@@ -1651,15 +1692,15 @@ export class Turntable {
         void main() {
           float facing = abs(dot(normalize(vN), normalize(vV)));
           float a = uStrength * pow(facing, 1.8) * smoothstep(0., .18, vT) * (1. - smoothstep(.62, 1., vT)) * (1.15 - .6 * vT);
-          gl_FragColor = vec4(uColor * a, a);
+          // drawn after tone mapping, into the sRGB frame: the light is encoded the way the frame is
+          gl_FragColor = vec4(pow(uColor * a * a, vec3(1. / 2.2)), 1.);
         }`,
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      transparent: true, depthWrite: false, side: THREE.DoubleSide, ...ADD_LIGHT,
     });
     this.beam = new THREE.Mesh(coneGeo, this.beamMat);
     this.beam.renderOrder = 5;
     this.beam.visible = false;
-    this.scene.add(this.beam);
-    this.noAO.push(this.beam);
+    this.fxScene.add(this.beam);
     // dust drifting through the light: only drawn inside the cone, so it costs nothing elsewhere
     const N = 70, pos = new Float32Array(N * 3), seed = new Float32Array(N * 4);
     for (let k = 0; k < N; k++) seed.set([Math.random() * Math.PI * 2, Math.sqrt(Math.random()) * .85, .15 + Math.random() * .8, Math.random()], k * 4);
@@ -1677,8 +1718,8 @@ export class Turntable {
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `uniform float uStrength; varying float vA;
-        void main() { float d = length(gl_PointCoord - .5); float a = uStrength * vA * smoothstep(.5, .1, d); gl_FragColor = vec4(vec3(1., .86, .68) * a, a); }`,
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        void main() { float d = length(gl_PointCoord - .5); float a = uStrength * vA * smoothstep(.5, .1, d); gl_FragColor = vec4(pow(vec3(1., .86, .68) * a * a, vec3(1. / 2.2)), 1.); }`,
+      transparent: true, depthWrite: false, ...ADD_LIGHT,
     });
     this.dust = new THREE.Points(dustGeo, this.dustMat);
     this.dust.frustumCulled = false;
@@ -2011,7 +2052,12 @@ export class Turntable {
     if (programs !== this.programs) { this.programs = programs; this.settle(1500); }   // a shader just compiled
     // Still, fully accumulated and the drift has not moved the view half a pixel: the frame on screen is
     // already the best one, so nothing is drawn until something changes.
-    if (this.canRest()) { this.stats.skipped++; return; }
+    if (this.canRest()) {
+      this.stats.skipped++;
+      // the deck rests; the dust in a lit beam keeps drifting, so only its pass runs again
+      if (this.beam.visible && !reduceMotion.matches && this.fxPass.frame) { this.fxPass.draw(this.renderer); this.stats.fx++; }
+      return;
+    }
     this.updateShadows();
     const t0 = performance.now();
     this.gpuTimer.begin();
@@ -2032,7 +2078,7 @@ export class Turntable {
 
   canRest() {
     this.placeCamera(); this.camera.updateMatrixWorld();
-    const rest = !this.busy && !this.lively && this.accum.n >= this.accum.max && !(this.lampLevel > .003 && !reduceMotion.matches)
+    const rest = !this.busy && !this.lively && this.accum.n >= this.accum.max
       && this.shadowEpoch === this.accumEpoch && this.viewShift(this.restView) < .4;
     if (!rest) return false;
     this.lastDrawSteady = false;
@@ -2074,6 +2120,7 @@ export class Turntable {
     if (still) {
       this.jitterI = (this.jitterI || 0) % 16 + 1;
       const pr = this.renderer.getPixelRatio(), v = this.camera.view;
+      this.viewBase = { x: v.offsetX, y: v.offsetY }; this.jittered = true;
       v.offsetX += (halton(this.jitterI, 2) - .5) / pr;
       v.offsetY += (halton(this.jitterI, 3) - .5) / pr;
       this.camera.updateProjectionMatrix();
@@ -2084,6 +2131,7 @@ export class Turntable {
     // the edge filter runs until the accumulation has enough samples of its own
     const filter = !still || acc.n < 3;
     acc.enabled = still;
+    this.fxPass.enabled = this.beam.visible;
     this.smaa.enabled = filter && T.aa === 'smaa';
     this.fxaa.enabled = filter && T.aa === 'fxaa';
     this.sharpen.enabled = this.sharpenAmount > .02;
