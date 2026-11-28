@@ -1015,10 +1015,11 @@ export class Turntable {
   // compile every shader the deck can need now, while the page fades in, instead of stalling the first
   // frame a sunny room lights up (a window light changes the light count, so it is another program)
   warmup() {
-    if (!this.renderer.compileAsync) return;
+    // compile() hands the programs to the driver (in parallel where it can) and returns; compileAsync
+    // would poll for them, and the light count changes back right after, which three does not expect
     const sun = this.sun, { visible, map } = sun;
     sun.visible = true; sun.map = map || goboTexture('blinds');
-    this.renderer.compileAsync(this.scene, this.camera).catch(() => {});
+    try { this.renderer.compile(this.scene, this.camera); } catch { /* a missing program compiles on first use */ }
     sun.visible = visible; sun.map = map;
   }
 

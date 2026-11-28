@@ -22,6 +22,9 @@ export function parseSpotify(text) {
     || String(text).match(/spotify:(track|album|playlist|artist|episode|show):([A-Za-z0-9]{22})/);
   return m ? { type: m[1], id: m[2], uri: `spotify:${m[1]}:${m[2]}` } : null;
 }
+// a song is the same song live, remastered, as a radio edit or on another album: first artist, bare title
+const songKey = (title = '', artist = '') => `${String(artist).split(',')[0].trim()}|${String(title).replace(/\s*[([].*$/, '').replace(/\s+-\s+.*$/, '').trim()}`.toLowerCase();
+const keyOf = (x) => songKey(x?.name || x?.title, x?.artist || (x?.artists || []).map((a) => a.name).join(', '));
 const img = (images, small) => {
   const list = (images || []).filter(Boolean);
   const pick = small ? list.at(-1) : list[0];
@@ -386,7 +389,8 @@ export class SpotifySource {
     const left = s.duration - s.position;
     clearTimeout(this.keepTimer);
     if (!s.paused && left > 30000) this.keepTimer = setTimeout(() => this.keepPlaying(t, 29000, true), left - 29500);
-    this.keepPlaying(t, left, !s.paused, s.track_window.next_tracks?.length);
+    this.keepPlaying(t, left, !s.paused, s.track_window.next_tracks);
+    this.watchEnd(t, !s.paused, s.position, s.duration);
     this.onState(this.mapTrack({
       id: t.id || t.uri, name: t.name, artists: t.artists, album: t.album, duration_ms: s.duration,
     }, { playing: !s.paused, position: s.position, device: 'this screen' }));
@@ -411,6 +415,7 @@ export class SpotifySource {
           if (typeof p.device?.volume_percent === 'number' && p.device.id !== this.deviceId) this.onVolume?.(p.device.volume_percent / 100);
           this.onState(this.mapTrack(p.item, { playing: p.is_playing, position: p.progress_ms, device: p.device?.name || '' }));
           this.keepPlaying(p.item, (p.item.duration_ms || 0) - (p.progress_ms || 0), p.is_playing);
+          this.watchEnd(p.item, p.is_playing, p.progress_ms || 0, p.item.duration_ms || 0);
         } else {
           this.onStatus?.('spotify', 'idle');
           this.onState({ source: 'spotify', track: null, playing: false, position: 0 });
@@ -536,40 +541,70 @@ export class SpotifySource {
     return uris.length;
   }
 
-  // Never stop, like the app: half a minute before the end of a song, if nothing is lined up after it,
-  // queue a few songs from the radio around the artist playing (Deezer's, see radio.js), each found on
-  // Spotify by title and artist. Looked at once per song; songs already played are not repeated.
-  async keepPlaying(item, remaining, playing, nextKnown) {
+  // Spotify's queue answers with the playing song repeated (sometimes another release of it) when
+  // nothing is really lined up: those are not next songs
+  realNext(list, now) {
+    const self = keyOf(now), seen = new Set();
+    return (list || []).filter((x) => {
+      const k = keyOf(x);
+      if (k === self || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  }
+
+  // songs from the radio around the artist playing (Deezer's, see radio.js), each found on Spotify by
+  // title and artist; songs already played this session are skipped
+  async radioPicks(item, n = 4) {
+    const played = this.played || (this.played = new Set());
+    const artist = (item.artists || []).map((a) => a.name).find(Boolean);
+    const self = keyOf(item);
+    played.add(self);
+    const out = [];
+    for (const t of await radioFor(artist)) {
+      if (out.length >= n) break;
+      const k = songKey(t.title, t.artist);
+      if (played.has(k)) continue;
+      const q = `track:"${t.title.replace(/"/g, '')}" artist:"${t.artist.replace(/"/g, '')}"`;
+      const hit = (await this.api(`/search?type=track&limit=1&q=${encodeURIComponent(q)}`).catch(() => null))?.tracks?.items?.[0];
+      if (!hit || keyOf(hit) === self) continue;
+      played.add(k); out.push(hit.uri);
+    }
+    if (played.size > 400) this.played = new Set([...played].slice(-200));
+    return out;
+  }
+
+  // Never stop, like the app: half a minute before the end of a song, if nothing is really lined up
+  // after it, queue a few songs from the radio. Looked at once per song.
+  async keepPlaying(item, remaining, playing, next) {
     const uri = item?.linked_from?.uri || item?.uri;
     if (!uri || !playing || !(remaining < 30000) || this.keepChecked === uri || this.keeping) return;
     this.keepChecked = uri;
     this.keeping = true;
-    const played = this.played || (this.played = new Set());
-    // a song is the same song live, remastered or as a radio edit: compare the bare title
-    const key = (title, artist) => `${artist.split(',')[0].trim()}|${title.replace(/\s*[([].*$/, '').replace(/\s+-\s+.*$/, '').trim()}`.toLowerCase();
-    const artists = (item.artists || []).map((a) => a.name).filter(Boolean);
-    played.add(key(item.name || '', artists[0] || ''));
     try {
-      const lined = nextKnown ?? (await this.queue().catch(() => [])).length;
-      if (lined > 0) return;
-      const radio = await radioFor(artists[0]);
-      const added = [];
-      for (const t of radio) {
-        if (added.length >= 4) break;
-        const k = key(t.title, t.artist);
-        if (played.has(k)) continue;
-        const q = `track:"${t.title.replace(/"/g, '')}" artist:"${t.artist.replace(/"/g, '')}"`;
-        const hit = (await this.api(`/search?type=track&limit=1&q=${encodeURIComponent(q)}`).catch(() => null))?.tracks?.items?.[0];
-        if (!hit || hit.uri === uri) continue;
-        await this.api(`/me/player/queue?uri=${encodeURIComponent(hit.uri)}`, { method: 'POST' });
-        played.add(k); added.push(hit.uri);
-      }
-      if (played.size > 400) this.played = new Set([...played].slice(-200));
+      if (this.realNext(next ?? await this.queue().catch(() => []), item).length) return;
+      for (const u of await this.radioPicks(item)) await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' });
     } catch (e) {
       console.warn('[crackle] could not line up more music', e.message);
     } finally {
       this.keeping = false;
     }
+  }
+
+  // The safety net: a song ran to its end and nothing followed (the queue could not be filled in time,
+  // or Spotify said something was next that was not). The radio starts outright. A pause in the middle
+  // of a song is the listener's and is left alone.
+  watchEnd(item, playing, position, duration) {
+    const uri = item?.uri;
+    if (!uri) return;
+    if (playing) { this.lastPlay = { uri, left: duration - position, at: Date.now() }; return; }
+    const lp = this.lastPlay;
+    if (!lp || lp.uri !== uri || this.rescued === uri) return;
+    if (lp.left - (Date.now() - lp.at) > 6000 || (position > 1500 && position < duration - 1500)) return;
+    this.rescued = uri;
+    this.radioPicks(item, 5)
+      .then((uris) => uris.length && this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris } })))
+      .catch((e) => console.warn('[crackle] could not start the radio', e.message));
   }
 
   // In the browser the SDK player's own level; when following the account, the playing device's

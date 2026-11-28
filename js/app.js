@@ -173,6 +173,7 @@ const bakedUrls = new Set();
 function bakeRoom(img) {
   // .room-img is inset by -4 %; background-size: cover gives CSS px per photo px
   const W = innerWidth * 1.08, H = innerHeight * 1.08, nw = img.naturalWidth, nh = img.naturalHeight;
+  if (!W || !H || !nw || !nh) return Promise.resolve(null);   // a hidden window has no size yet
   const cover = Math.max(W / nw, H / nh), blur = prefs.blur;
   const cw = blur >= 6 ? 960 : blur >= 2 ? 1440 : nw, k = cw / nw, ch = Math.round(nh * k);
   const r = blur * k / cover, pad = Math.ceil(r * 3) + 1;
@@ -657,7 +658,9 @@ function queueTick(pos) {
 
 async function refreshQueue() {
   if ($('#queue-pop').hidden) return;
-  spotifyNext = active === spotify && spotify.connected ? await spotify.queue().catch(() => []) : [];
+  // without Spotify's phantom entries: the playing song repeated when nothing is lined up
+  spotifyNext = active === spotify && spotify.connected
+    ? spotify.realNext(await spotify.queue().catch(() => []), state.track) : [];
   renderQueue();
 }
 function queueRow(r, { onPlay, onRemove } = {}) {
