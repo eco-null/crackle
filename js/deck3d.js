@@ -14,19 +14,152 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
+import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 
 // CC0 assets from Poly Haven, loaded from its CDN (CORS enabled). The deck renders with the
 // built-in reflection room and photo textures until they arrive.
 const PH = 'https://dl.polyhaven.org/file/ph-assets';
 const HDRI = `${PH}/HDRIs/hdr/1k/brown_photostudio_02_1k.hdr`;
-const pbrUrls = (id) => ({
-  map: `${PH}/Textures/jpg/2k/${id}/${id}_diff_2k.jpg`,
-  normal: `${PH}/Textures/jpg/2k/${id}/${id}_nor_gl_2k.jpg`,
-  rough: `${PH}/Textures/jpg/2k/${id}/${id}_rough_2k.jpg`,
+const pbrUrls = (id, res = '2k') => ({
+  map: `${PH}/Textures/jpg/${res}/${id}/${id}_diff_${res}.jpg`,
+  normal: `${PH}/Textures/jpg/${res}/${id}/${id}_nor_gl_${res}.jpg`,
+  rough: `${PH}/Textures/jpg/${res}/${id}/${id}_rough_${res}.jpg`,
 });
 import { asset, METALS } from './materials.js';
 
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+// ---------- quality ----------
+// Specular antialiasing for normal- and bump-mapped surfaces (Tokuyoshi & Kaplanyan): where the normal
+// turns faster than a pixel can show (record grooves, brushed and knurled metal, wood grain seen
+// small), that variation becomes roughness instead of sparkle and crawling highlights.
+THREE.ShaderChunk.normal_fragment_maps += `
+#if defined( STANDARD ) && ( defined( USE_NORMALMAP ) || defined( USE_BUMPMAP ) )
+{
+  vec3 dndu = dFdx( normal ), dndv = dFdy( normal );
+  float k2 = min( .5 * ( dot( dndu, dndu ) + dot( dndv, dndv ) ), .18 );
+  roughnessFactor = sqrt( clamp( roughnessFactor * roughnessFactor + k2, 0., 1. ) );
+}
+#endif
+`;
+
+// Quality tiers. dpr: highest pixel ratio drawn; msaa: samples of the scene buffer; aa: the edge
+// filter used where there is no MSAA; ao: ambient occlusion; full: clearcoat, anisotropy and sheen;
+// softbox: the area light (else folded into the environment); shadow map sizes; fps: frame-rate
+// ceiling while moving; pbr: resolution of the scanned wood.
+export const TIERS = {
+  high: { dpr: 2, msaa: 4, aa: null, ao: true, full: true, softbox: true, key: 2048, lamp: 1024, sun: 1024, fps: 60, pbr: '2k' },
+  balanced: { dpr: 1.5, msaa: 0, aa: 'smaa', ao: true, full: true, softbox: true, key: 1024, lamp: 1024, sun: 1024, fps: 60, pbr: '2k' },
+  low: { dpr: 1.25, msaa: 0, aa: 'fxaa', ao: false, full: false, softbox: false, key: 1024, lamp: 512, sun: 512, fps: 30, pbr: '1k' },
+};
+const TIER_ORDER = ['high', 'balanced', 'low'];
+// render scales the frame-rate governor steps through, on top of the tier's pixel ratio
+const SCALES = [1, .85, .72, .6];
+
+// A first guess from what the browser says about the device; the governor corrects it from there.
+export function detectTier(gl) {
+  const ua = navigator.userAgent;
+  const ext = gl.getExtension('WEBGL_debug_renderer_info');
+  const gpu = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)).toLowerCase();
+  const tv = /smart-?tv|tizen|web0s|webos|netcast|bravia|hbbtv|vidaa|android tv|googletv|crkey|\baft[a-z]{1,3}\b|roku|philipstv/i.test(ua);
+  const mobile = /android|iphone|ipad|mobile/i.test(ua) || matchMedia('(pointer: coarse)').matches;
+  const mem = navigator.deviceMemory || 8, cores = navigator.hardwareConcurrency || 8;
+  if (tv || mem <= 2 || cores <= 2 || /swiftshader|llvmpipe|software|basic render/.test(gpu)) return 'low';
+  if (mobile || mem <= 4 || cores <= 4 || /intel|mali|adreno|powervr|videocore/.test(gpu)) return 'balanced';
+  return 'high';
+}
+
+// GPU time per frame from EXT_disjoint_timer_query_webgl2 where the browser offers it. Results arrive a
+// few frames late; ms stays null without the extension.
+class GpuTimer {
+  constructor(gl) {
+    this.gl = gl;
+    this.ext = gl.getExtension('EXT_disjoint_timer_query_webgl2');
+    this.pending = []; this.q = null; this.ms = null;
+  }
+  begin() {
+    if (!this.ext || this.q) return;
+    this.q = this.gl.createQuery();
+    this.gl.beginQuery(this.ext.TIME_ELAPSED_EXT, this.q);
+  }
+  end() {
+    if (!this.q) return;
+    const gl = this.gl;
+    gl.endQuery(this.ext.TIME_ELAPSED_EXT);
+    this.pending.push(this.q); this.q = null;
+    while (this.pending.length && gl.getQueryParameter(this.pending[0], gl.QUERY_RESULT_AVAILABLE)) {
+      const q = this.pending.shift();
+      const ns = gl.getQueryParameter(q, gl.QUERY_RESULT);
+      gl.deleteQuery(q);
+      if (gl.getParameter(this.ext.GPU_DISJOINT_EXT)) continue;
+      this.ms = this.ms == null ? ns / 1e6 : this.ms * .8 + ns / 1e6 * .2;
+    }
+    while (this.pending.length > 8) gl.deleteQuery(this.pending.shift());
+  }
+}
+
+const halton = (i, b) => { let f = 1, r = 0; while (i > 0) { f /= b; r += f * (i % b); i = Math.floor(i / b); } return r; };
+const QUAD_VS = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.); }';
+
+// Contrast-adaptive sharpening (after AMD's CAS): gives back the crispness a frame drawn below the
+// screen's resolution loses in the upscale, lighter where an edge is already strong so it never rings.
+// It stays off the deck's silhouette, where the page shows through.
+const SharpenShader = {
+  uniforms: { tDiffuse: { value: null }, texel: { value: new THREE.Vector2(1, 1) }, amount: { value: 0 } },
+  vertexShader: QUAD_VS,
+  fragmentShader: `uniform sampler2D tDiffuse; uniform vec2 texel; uniform float amount; varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      vec4 b = texture2D(tDiffuse, vUv - vec2(0., texel.y)), h = texture2D(tDiffuse, vUv + vec2(0., texel.y));
+      vec4 d = texture2D(tDiffuse, vUv - vec2(texel.x, 0.)), f = texture2D(tDiffuse, vUv + vec2(texel.x, 0.));
+      vec3 mn = min(c.rgb, min(min(b.rgb, h.rgb), min(d.rgb, f.rgb)));
+      vec3 mx = max(c.rgb, max(max(b.rgb, h.rgb), max(d.rgb, f.rgb)));
+      vec3 amp = sqrt(clamp(min(mn, 1. - mx) / max(mx, vec3(1e-4)), 0., 1.));
+      float solid = step(.999, min(c.a, min(min(b.a, h.a), min(d.a, f.a))));
+      vec3 w = -amp * mix(.08, .2, amount) * solid;
+      gl_FragColor = vec4(clamp((c.rgb + (b.rgb + d.rgb + f.rgb + h.rgb) * w) / (1. + 4. * w), 0., 1.), c.a);
+    }`,
+};
+
+// Still-frame supersampling: while nothing moves, every frame is drawn with a sub-pixel camera offset
+// and averaged into the frames before it. Edges, grooves and the ambient occlusion settle to the look
+// of many samples per pixel; after `max` frames it keeps a running average, so the slow camera drift
+// stays smooth without ghosting.
+class AccumPass extends Pass {
+  constructor() {
+    super();
+    const opts = { type: THREE.HalfFloatType, depthBuffer: false };
+    this.rt = [new THREE.WebGLRenderTarget(1, 1, opts), new THREE.WebGLRenderTarget(1, 1, opts)];
+    this.n = 0; this.max = 16;
+    this.blend = new FullScreenQuad(new THREE.ShaderMaterial({
+      uniforms: { tNew: { value: null }, tAcc: { value: null }, w: { value: 1 } },
+      vertexShader: QUAD_VS,
+      fragmentShader: 'uniform sampler2D tNew, tAcc; uniform float w; varying vec2 vUv; void main() { gl_FragColor = mix(texture2D(tAcc, vUv), texture2D(tNew, vUv), w); }',
+      depthTest: false, depthWrite: false,
+    }));
+    this.copy = new FullScreenQuad(new THREE.ShaderMaterial({
+      uniforms: { t: { value: null } },
+      vertexShader: QUAD_VS,
+      fragmentShader: 'uniform sampler2D t; varying vec2 vUv; void main() { gl_FragColor = texture2D(t, vUv); }',
+      depthTest: false, depthWrite: false,
+    }));
+  }
+  reset() { this.n = 0; }
+  setSize(w, h) { for (const r of this.rt) r.setSize(w, h); this.n = 0; }
+  render(renderer, writeBuffer, readBuffer) {
+    this.n = Math.min(this.max, this.n + 1);
+    const u = this.blend.material.uniforms;
+    u.tNew.value = readBuffer.texture; u.tAcc.value = this.rt[0].texture; u.w.value = 1 / this.n;
+    renderer.setRenderTarget(this.rt[1]); this.blend.render(renderer);
+    this.rt.reverse();
+    this.copy.material.uniforms.t.value = this.rt[0].texture;
+    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer); this.copy.render(renderer);
+  }
+  dispose() { for (const r of this.rt) r.dispose(); this.blend.dispose(); this.copy.dispose(); }
+}
 
 // ---------- geometry constants (cm) ----------
 const PL = { w: 45, d: 35, h: 5.6, y0: 1.4 };            // plinth
@@ -118,8 +251,9 @@ function noise1d(seed) {
   };
 }
 
-// Record surface maps: normal (rolled edge, track-gap steps), roughness, tangential anisotropy.
-function recordMaps(size) {
+// Record surface maps: normal (rolled edge, track-gap steps), roughness, tangential anisotropy. Plain
+// arrays, so the same function runs in a worker (see recordDataAsync).
+function recordData(size) {
   const N = 4096;                                    // radial profile resolution
   const h = new Float32Array(N), rough = new Float32Array(N), an = new Float32Array(N);
   const n1 = noise1d(7), n2 = noise1d(19);
@@ -160,7 +294,27 @@ function recordMaps(size) {
       ani[o] = (-uy * .5 + .5) * 255; ani[o + 1] = (ux * .5 + .5) * 255; ani[o + 2] = an[i] * 255; ani[o + 3] = 255;
     }
   }
-  return { normal: dataTex(size, size, nrm), roughness: dataTex(size, size, rgh), aniso: dataTex(size, size, ani) };
+  return { size, nrm, rgh, ani };
+}
+
+// The record maps take a quarter of a second on a fast desktop and seconds on a TV: they are computed in
+// a worker from the same functions, while the record shows a plain lacquer surface until they arrive.
+function recordDataAsync(size) {
+  const src = `const smooth = ${smooth};
+const REC = ${JSON.stringify(REC)}, R_RUNOUT = ${R_RUNOUT}, R_LEADIN = ${R_LEADIN};
+${noise1d}
+${recordData}
+onmessage = (e) => { const d = recordData(e.data); postMessage(d, [d.nrm.buffer, d.rgh.buffer, d.ani.buffer]); };`;
+  return new Promise((resolve) => {
+    try {
+      const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      const w = new Worker(url);
+      const done = (d) => { resolve(d); w.terminate(); URL.revokeObjectURL(url); };
+      w.onmessage = (e) => done(e.data);
+      w.onerror = () => done(recordData(size));
+      w.postMessage(size);
+    } catch { resolve(recordData(size)); }
+  });
 }
 
 // Circular brushing for machined round tops (knob, platter chamfer).
@@ -594,14 +748,22 @@ export class Turntable {
     this.region = null; this.regionTarget = null;
     this.drift = { x: 0, y: 0 };
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
+    // no multisampling on the page's own buffer: antialiasing happens in the composer (MSAA on its
+    // scene buffer, an edge filter, or still-frame accumulation); a multisampled canvas only costs bandwidth
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true, powerPreference: 'high-performance' });
     this.renderer.toneMapping = THREE.NeutralToneMapping;
     this.renderer.toneMappingExposure = 1.02;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.VSMShadowMap;
     this.renderer.shadowMap.autoUpdate = true;     // gated per light in loop(): each map is redrawn only when needed
     this.maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    this.renderer.info.autoReset = false;          // counted per frame in render(), across all passes
+    this.tierAuto = this.tierDetected = detectTier(this.renderer.getContext());
+    this.quality = 'auto';
+    this.T = TIERS[this.tierAuto];
+    this.scaleIx = 0;
+    this.gpuTimer = new GpuTimer(this.renderer.getContext());
+    this.stats = { fps: 0, gpu: null, cpu: 0, calls: 0, tris: 0, ao: 0, shadows: 0, skipped: 0, drawn: 0 };
 
     this.scene = new THREE.Scene();
     const pmrem = new THREE.PMREMGenerator(this.renderer);
@@ -618,8 +780,10 @@ export class Turntable {
     });
 
     this.camera = new THREE.PerspectiveCamera(24, 1, 30, 900);
-    // post: multisampled HDR target, ground-truth ambient occlusion, then tone mapping and sRGB output
-    const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    // post: HDR scene buffer (multisampled where the tier affords it), cached ground-truth ambient
+    // occlusion, tone mapping and sRGB output; then still-frame accumulation, an edge filter and
+    // sharpening, each only when the tier and the moment need it
+    const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: this.T.msaa });
     this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.ao = new GTAOPass(this.scene, this.camera, 1, 1);
@@ -634,17 +798,29 @@ export class Turntable {
     // see-through helpers (shadow quads, the lamp beam) must not enter the AO depth/normal pass, or it
     // treats them as solid surfaces and greys out their whole rectangle
     this.ao.overrideVisibility = () => { hide(); for (const o of this.noAO) o.visible = false; };
+    this.cacheAO();
     this.composer.addPass(this.ao);
     this.composer.addPass(new OutputPass());
-    this.useComposer = true;
+    this.accum = new AccumPass();
+    this.smaa = new SMAAPass(1, 1);
+    this.fxaa = new ShaderPass(FXAAShader);
+    this.sharpen = new ShaderPass(SharpenShader);
+    for (const pass of [this.accum, this.smaa, this.fxaa, this.sharpen]) { pass.enabled = false; this.composer.addPass(pass); }
     this.texLoader = new THREE.TextureLoader();
     this.textures = new Map();
 
     this.buildLights();
+    const t0 = performance.now();
     this.buildDeck();
+    this.stats.build = Math.round(performance.now() - t0);
     this.bindPointer();
-    this.resize();
+    this.applyQuality();
     new ResizeObserver(() => this.resize()).observe(canvas);
+    // the first seconds (shader compiles, texture uploads) and the return to a hidden tab say nothing
+    // about how fast the device draws
+    this.settle(5000);
+    document.addEventListener('visibilitychange', () => this.settle(2500));
+    this.warmup();
 
     this.last = performance.now();
     this.setRecord({});
@@ -654,7 +830,7 @@ export class Turntable {
 
   // Scanned wood set (colour, normal, roughness); swapped in once all three maps are decoded.
   loadPbr(b, id) {
-    const urls = pbrUrls(b.pbr);
+    const urls = pbrUrls(b.pbr, this.T?.pbr);
     const load = (url, srgb) => new Promise((res) => {
       if (this.textures.has(url)) return res(this.textures.get(url));
       this.texLoader.load(url, (t) => {
@@ -740,6 +916,152 @@ export class Turntable {
     this.scene.environmentRotation.set(0, rotation, 0);
   }
 
+  // ---------- quality ----------
+  // quality: 'auto' (the detected tier, with resolution governed by the frame rate) or a tier name
+  setQuality(q) {
+    this.quality = TIERS[q] ? q : 'auto';
+    this.scaleIx = 0;
+    this.applyQuality();
+  }
+
+  applyQuality() {
+    const name = this.quality === 'auto' ? this.tierAuto : this.quality, T = TIERS[name];
+    this.tier = name; this.T = T;
+    for (const t of [this.composer.renderTarget1, this.composer.renderTarget2]) {
+      if (t.samples !== T.msaa) { t.samples = T.msaa; t.dispose(); }
+    }
+    this.ao.enabled = T.ao; this.aoDirty = true;
+    this.softbox.visible = T.softbox;
+    this.envBoost = T.softbox ? 1 : 1.3;            // the softbox's share of the light, from the environment
+    for (const [light, size] of [[this.key, T.key], [this.lampLight, T.lamp], [this.sun, T.sun]]) {
+      if (light.shadow.mapSize.x === size) continue;
+      light.shadow.mapSize.set(size, size);
+      light.shadow.map?.dispose(); light.shadow.map = null;
+    }
+    this.shadowEpoch = (this.shadowEpoch || 0) + 1;
+    this.applyTierMaterials();
+    this.resizePixels();
+    this.settle(2000);
+    this.onTier?.(name);
+  }
+
+  // pixel ratio from the tier and the governor's scale; sharpening follows how far below the screen it is
+  resizePixels() {
+    const dpr = window.devicePixelRatio || 1;
+    const pr = Math.max(.6, Math.min(dpr, this.T.dpr) * SCALES[this.scaleIx]);
+    this.renderer.setPixelRatio(pr);
+    this.sharpenAmount = Math.min(1, Math.max(0, 1 - pr / dpr) * 1.8);
+    this.resize();
+    this.onScale?.();
+  }
+
+  // The light tier drops clearcoat, anisotropy and sheen: each is another lobe in every pixel's
+  // lighting. The record keeps its anisotropy; its two highlight wedges are what make it a record.
+  applyTierMaterials() {
+    const full = this.T.full;
+    this.scene.traverse((o) => {
+      for (const m of o.material ? [].concat(o.material) : []) {
+        if (!m.isMeshPhysicalMaterial || m === this.recMat) continue;
+        const u = m.userData;
+        if (!full && !u.full && (m.clearcoat || m.anisotropy || m.sheen)) {
+          u.full = { clearcoat: m.clearcoat, anisotropy: m.anisotropy, sheen: m.sheen };
+          m.clearcoat = 0; m.anisotropy = 0; m.sheen = 0;
+        } else if (full && u.full) { Object.assign(m, u.full); delete u.full; }
+      }
+    });
+  }
+
+  // compile every shader the deck can need now, while the page fades in, instead of stalling the first
+  // frame a sunny room lights up (a window light changes the light count, so it is another program)
+  warmup() {
+    if (!this.renderer.compileAsync) return;
+    const sun = this.sun, { visible, map } = sun;
+    sun.visible = true; sun.map = map || goboTexture('blinds');
+    this.renderer.compileAsync(this.scene, this.camera).catch(() => {});
+    sun.visible = visible; sun.map = map;
+  }
+
+  settle(ms) { this.settleUntil = Math.max(this.settleUntil || 0, performance.now() + ms); }
+
+  // Frame-rate governor (auto quality only). A frame is late when it arrives well after its slot on the
+  // display's cadence, or when the GPU timer says it took most of that slot. Steady lateness lowers the
+  // render scale; a long stretch with room to spare raises it again. A raise that fails right away is
+  // not retried for a while, so it never oscillates; at the lowest scale it drops a tier.
+  govern(gapMs, slotMs) {
+    if (this.quality !== 'auto' || performance.now() < (this.settleUntil || 0)) return;
+    const g = this.gov || (this.gov = { late: 0, roomy: 0, lockUntil: 0, lockMs: 15000, raisedAt: -1e9 });
+    const gpu = this.gpuTimer.ms, now = performance.now();
+    const late = gapMs > slotMs * 1.45 || (gpu != null && gpu > slotMs * .9);
+    g.late = g.late * .94 + (late ? .06 : 0);
+    const spare = gpu != null ? gpu < slotMs * .45 : !late;
+    g.roomy = spare ? g.roomy + gapMs : 0;
+    if (g.late > .4) {
+      g.late = 0; g.roomy = 0;
+      if (now - g.raisedAt < 6000) { g.lockMs = Math.min(300000, g.lockMs * 2); g.lockUntil = now + g.lockMs; }
+      if (this.scaleIx < SCALES.length - 1) { this.scaleIx++; this.resizePixels(); }
+      else if (TIER_ORDER.indexOf(this.tierAuto) < TIER_ORDER.length - 1) {
+        this.tierAuto = TIER_ORDER[TIER_ORDER.indexOf(this.tierAuto) + 1];
+        this.scaleIx = 1;
+        this.applyQuality();
+      }
+      this.settle(1500);
+    } else if (this.scaleIx > 0 && now > g.lockUntil && g.roomy > (gpu != null ? 6000 : 15000)) {
+      g.roomy = 0; g.raisedAt = now;
+      this.scaleIx--; this.resizePixels();
+      this.settle(1500);
+    } else if (this.scaleIx === 0 && gpu != null && gpu < slotMs * .3 && this.tierAuto !== this.tierDetected && now > g.lockUntil && g.roomy > 20000) {
+      // a tier dropped for a passing slowdown comes back, but only with the GPU timer's word for it
+      g.roomy = 0; g.raisedAt = now;
+      this.tierAuto = TIER_ORDER[TIER_ORDER.indexOf(this.tierAuto) - 1];
+      this.scaleIx = 2;
+      this.applyQuality();
+    }
+  }
+
+  // Ambient occlusion only changes when the camera or a part of the deck moves: the spinning platter is
+  // round and the arm tracks slowly. The AO buffer is kept and blended in again until then.
+  cacheAO() {
+    const ao = this.ao, full = ao.render.bind(ao), size = ao.setSize.bind(ao);
+    ao.render = (renderer, writeBuffer, readBuffer, ...rest) => {
+      if (this.aoDirty) { this.aoDirty = false; this.stats.ao++; return full(renderer, writeBuffer, readBuffer, ...rest); }
+      const out = ao.renderToScreen ? null : writeBuffer;
+      ao.copyMaterial.uniforms.tDiffuse.value = readBuffer.texture;
+      ao.copyMaterial.blending = THREE.NoBlending;
+      ao.renderPass(renderer, ao.copyMaterial, out);
+      ao.blendMaterial.uniforms.intensity.value = ao.blendIntensity;
+      ao.blendMaterial.uniforms.tDiffuse.value = ao.pdRenderTarget.texture;
+      ao.renderPass(renderer, ao.blendMaterial, out);
+    };
+    ao.setSize = (w, h) => { size(w, h); this.aoDirty = true; };
+  }
+
+  // how far the view moved since `from`, in screen pixels (position and aim; a rough measure)
+  viewShift(from) {
+    if (!from) return Infinity;
+    const cam = this.camera, e = cam.matrixWorld.elements;
+    const dist = cam.position.distanceTo(this.camTarget || cam.position);
+    const pxPerCm = this.renderer.domElement.height / (2 * Math.max(1, dist) * Math.tan(cam.fov * Math.PI / 360));
+    const dp = Math.hypot(e[12] - from[0], e[13] - from[1], e[14] - from[2]);
+    const dd = Math.hypot(e[8] - from[3], e[9] - from[4], e[10] - from[5]) * dist;
+    return (dp + dd) * pxPerCm;
+  }
+  viewSig() { const e = this.camera.matrixWorld.elements; return [e[12], e[13], e[14], e[8], e[9], e[10]]; }
+
+  // AO is redrawn for real moves at once, for the slow ones (drift, arm tracking) a few times a second
+  aoCheck() {
+    if (!this.ao.enabled || this.aoDirty) return;
+    const parts = [this.armAngle, this.lift * 20, this.lidOpen * 30, this.recordGroup.position.y * 4, this.lampUp * 20,
+      this.knob.rotation.y * 4, (this.fader?.position.z ?? 0) * 2, (this.selector?.rotation.y ?? 0) * 4, this.pressing ? 1 : 0, this.shadowEpoch || 0];
+    const last = this.aoSig, now = performance.now();
+    const dp = last ? Math.max(...parts.map((v, i) => Math.abs(v - last.parts[i]))) : Infinity;
+    const dv = this.viewShift(last?.view);
+    const big = dp > .3 || dv > 2, small = dp > .02 || dv > .5;
+    if (big || (small && now - (this.aoAt || 0) > 250)) {
+      this.aoDirty = true; this.aoAt = now;
+      this.aoSig = { parts, view: this.viewSig() };
+    }
+  }
+
   // Light the deck like the room behind it. room: { id, img (url or null), light }. The photo is read
   // for the room's own light; `light` tunes what a picture cannot say: a fire's flicker (flicker), the
   // colour of a lamp or tube (key, rim), how strong they and the soft fill are (keyI, rimI, boxI:
@@ -747,6 +1069,8 @@ export class Turntable {
   // window light through blinds, panes or leaves (gobo, sun colour, sunI, sunAt [x, y, z]).
   setRoom(room) {
     this.roomId = room.id;
+    this.settle(1500);
+    this.shadowEpoch = (this.shadowEpoch || 0) + 1;
     const L = room.light || {}, flicker = L.flicker || 0;
     const tune = () => {
       const t = this.rigTarget;
@@ -810,6 +1134,8 @@ export class Turntable {
     const sunOn = r.sunI > .01;
     if (sunOn !== this.sun.visible) { this.sun.visible = sunOn; this.shadowEpoch = (this.shadowEpoch || 0) + 1; }
     if (moved > .05) this.shadowEpoch = (this.shadowEpoch || 0) + 1;
+    this.lively = moved > .01 || r.flicker > .01 || r.key.manhattanDistanceTo?.(t.key) > .003
+      || Math.abs(t.keyI - r.keyI) + Math.abs(t.boxI - r.boxI) + Math.abs(t.sunI - r.sunI) + Math.abs(t.env - r.env) > .004;
     // fire never burns steady: three slow, incommensurate waves, a few percent deep
     const ts = performance.now() / 1000;
     const fl = 1 + r.flicker * (.05 * Math.sin(ts * 7.3) + .035 * Math.sin(ts * 12.9 + 1.7) + .03 * Math.sin(ts * 2.3 + .4));
@@ -817,7 +1143,7 @@ export class Turntable {
     this.rim.color.copy(r.rim); this.rim.intensity = r.rimI; this.rim.position.copy(r.rimPos);
     this.softbox.color.copy(r.box); this.softbox.intensity = r.boxI * (1 + (fl - 1) * .5);
     this.sun.color.copy(r.sun); this.sun.intensity = r.sunI; this.sun.position.copy(r.sunPos);
-    this.scene.environmentIntensity = r.env;
+    this.scene.environmentIntensity = r.env * (this.envBoost || 1);
   }
 
   buildDeck() {
@@ -879,8 +1205,17 @@ export class Turntable {
     mat.position.y = PLATTER.h + MAT_T / 2;
 
     // record
-    const maps = recordMaps(2048);
-    for (const t of Object.values(maps)) t.anisotropy = this.maxAniso;
+    const flat = (r, g, b) => dataTex(1, 1, new Uint8Array([r, g, b, 255]));
+    const maps = { normal: flat(128, 128, 255), roughness: flat(51, 51, 51), aniso: flat(128, 128, 0) };
+    recordDataAsync(this.T.pbr === '1k' ? 1024 : 2048).then((d) => {
+      const m = this.recMat;
+      for (const [slot, data] of [['normalMap', d.nrm], ['roughnessMap', d.rgh], ['anisotropyMap', d.ani]]) {
+        const t = dataTex(d.size, d.size, data);
+        t.anisotropy = this.maxAniso;
+        m[slot].dispose(); m[slot] = t;
+      }
+      this.shadowEpoch = (this.shadowEpoch || 0) + 1;
+    });
     this.recMat = new THREE.MeshPhysicalMaterial({
       color: '#0b0b0c', roughness: 1, roughnessMap: maps.roughness, normalMap: maps.normal,
       anisotropy: .9, anisotropyMap: maps.aniso, clearcoat: .2, clearcoatRoughness: .12, specularIntensity: .9,
@@ -1138,6 +1473,7 @@ export class Turntable {
     }
     this.buildLayout(LAYOUTS[key]);
     if (this.look) this.tintHardware(this.look);
+    if (this.tier) this.applyTierMaterials();
     this.shadowEpoch = (this.shadowEpoch || 0) + 1;
   }
 
@@ -1347,10 +1683,21 @@ export class Turntable {
     this.dust = new THREE.Points(dustGeo, this.dustMat);
     this.dust.frustumCulled = false;
     this.beam.add(this.dust);
-    // strobe lamp glows the rim dots when the platter runs
-    this.strobeLight = new THREE.PointLight('#ff7a3a', 0, 3.2, 2);
-    this.strobeLight.position.set(C.x - 11.6, PLATTER.y + .9, C.z + 11.6);
-    this.scene.add(this.strobeLight);
+    // strobe lamp: an orange glow on the rim and its dots by the front left while the platter runs.
+    // It is drawn in the rim's own shader, anchored in the world so the dots run through it, instead of
+    // a point light that every pixel of the deck would have to evaluate.
+    this.strobeU = { value: 0 };
+    const at = new THREE.Vector3(C.x - 11.6, PLATTER.y + .9, C.z + 11.6);
+    this.rimMat.onBeforeCompile = (sh) => {
+      sh.uniforms.uStrobe = this.strobeU;
+      sh.uniforms.uStrobeAt = { value: at };
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vStrobeW;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvStrobeW = (modelMatrix * vec4(transformed, 1.)).xyz;');
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nuniform float uStrobe; uniform vec3 uStrobeAt; varying vec3 vStrobeW;')
+        .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+          float strobeD = max(0., 1. - distance(vStrobeW, uStrobeAt) / 3.4);
+          totalEmissiveRadiance += vec3(1., .42, .16) * uStrobe * diffuseColor.rgb * strobeD * strobeD;`);
+    };
   }
 
   // Dust cover: one rounded acrylic hood (5 mm wall), hinged at the back. Smoked acrylic reflects
@@ -1408,6 +1755,7 @@ export class Turntable {
   applyMaterial(m, vinyl) {
     this.materialId = m.id;
     const b = m.body, mat = this.bodyMat;
+    delete mat.userData.full; delete this.matMat.userData.full;
     mat.map = b.tex ? this.tex(b.tex) : null;
     mat.bumpMap = b.tex && b.bump ? this.tex(b.tex, { srgb: false }) : null;
     mat.bumpScale = b.bump || 0;
@@ -1432,6 +1780,7 @@ export class Turntable {
     this.matMat.needsUpdate = true;
     this.led = new THREE.Color(m.led);
     this.applyVinyl(vinyl);
+    this.applyTierMaterials();
   }
 
   // metal finish of the hardware, and an ink for the engraving and silkscreen that reads on it
@@ -1472,6 +1821,7 @@ export class Turntable {
 
   // New album: arm parks, the record lifts off, the new one (label printed with the cover) drops on.
   setRecord({ key = '', title = '', artist = '', art = '', artFallback = '' }) {
+    this.shadowEpoch = (this.shadowEpoch || 0) + 1;
     if (this.recordKey !== undefined && key === this.recordKey) return;
     this.recordKey = key;
     const token = (this.recordToken = (this.recordToken || 0) + 1);
@@ -1592,9 +1942,13 @@ export class Turntable {
     const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
     if (!w || !h) return;
     this.renderer.setSize(w, h, false);
-    this.composer?.setPixelRatio(this.renderer.getPixelRatio());
-    this.composer?.setSize(w, h);
+    const pr = this.renderer.getPixelRatio();
+    this.composer.setPixelRatio(pr);
+    this.composer.setSize(w, h);
     this.size = { w, h };
+    const pw = Math.round(w * pr), ph = Math.round(h * pr);
+    this.fxaa.uniforms.resolution.value.set(1 / pw, 1 / ph);
+    this.sharpen.uniforms.texel.value.set(1 / pw, 1 / ph);
   }
 
   setZoom(z) { this.zoomTarget = Math.max(.85, Math.min(3.2, z)); }
@@ -1630,58 +1984,112 @@ export class Turntable {
   }
 
   loop(now) {
+    requestAnimationFrame(this.loop);
     const dt = Math.min(.1, (now - this.last) / 1000);
     this.last = now;
-    requestAnimationFrame(this.loop);
-    // At most 60 frames a second, whatever the display refresh: a 144 Hz monitor would otherwise draw
-    // the full scene 144 times a second for motion that 60 already shows smoothly. A still scene (record
-    // stopped, nothing settling) only drifts very slowly, so it gets 30.
+    // The display's refresh rate, read from callbacks that follow one where nothing was drawn: those
+    // intervals are the screen's own, not the time a heavy frame took.
+    if (!this.drewLast && dt > .004) {
+      const r = this.rf || (this.rf = []);
+      r.push(dt); if (r.length > 31) r.shift();
+      if (r.length >= 9) this.refreshHz = Math.round(1 / [...r].sort((a, b) => a - b)[r.length >> 1]);
+    }
+    this.drewLast = false;
     this.held = (this.held || 0) + dt;
-    this.budget = (this.budget || 0) + dt;
-    const interval = this.busy ? 1 / 60 : 1 / 30;
-    if (this.budget < interval * .9) return;
-    this.budget = Math.max(0, Math.min(interval, this.budget - interval));   // keep the cadence, bank at most a frame
+    // Frame pacing: draw on every n-th refresh so frames arrive evenly on 50, 60, 120 or 144 Hz screens.
+    // Moving: up to the tier's ceiling (60, or 30 on the light tier); still: half of that.
+    const hz = this.refreshHz || 60;
+    const want = this.busy ? this.T.fps : Math.min(30, this.T.fps / 2);
+    const every = Math.max(1, Math.round(hz / want));
+    this.tick = (this.tick || 0) + 1;
+    if (this.tick < every) return;
+    this.tick = 0;
     const step = Math.min(.1, this.held);
     this.held = 0;
     this.step(step);
-    // Shadows are redrawn per light. The key light's large map follows shadowsDirty() (casters that
-    // actually moved). The stylus lamp sits low and close, so its long shadow of the arm magnifies the
-    // arm's slow tracking and its once-per-turn sway: its small map is redrawn every frame the arm moves.
-    const key = this.key.shadow, lamp = this.lampLight.shadow, sun = this.sun.shadow;
-    key.autoUpdate = lamp.autoUpdate = sun.autoUpdate = false;
-    if (this.shadowsDirty()) key.needsUpdate = lamp.needsUpdate = sun.needsUpdate = true;
-    const arm = [this.armYaw.rotation.y, this.armPitch.rotation.z, this.lampLight.target.position.x, this.lampLight.target.position.z, this.lampLight.position.y];
-    if (this.lampLevel > .003 && (!this.armSig || arm.some((v, i) => Math.abs(v - this.armSig[i]) > 1e-7))) lamp.needsUpdate = true;
-    this.armSig = arm;
+    const programs = this.renderer.info.programs?.length || 0;
+    if (programs !== this.programs) { this.programs = programs; this.settle(1500); }   // a shader just compiled
+    // Still, fully accumulated and the drift has not moved the view half a pixel: the frame on screen is
+    // already the best one, so nothing is drawn until something changes.
+    if (this.canRest()) { this.stats.skipped++; return; }
+    this.updateShadows();
+    const t0 = performance.now();
+    this.gpuTimer.begin();
     this.render();
-    if (!document.hidden && !this.noAdapt && this.busy) this.adapt(step);
+    this.gpuTimer.end();
+    this.drewLast = true;
+    const s = this.stats, slot = every * 1000 / hz, gap = this.lastDraw ? now - this.lastDraw : slot;
+    s.cpu = s.cpu * .9 + (performance.now() - t0) * .1;
+    s.gpu = this.gpuTimer.ms;
+    s.drawn++;
+    s.fps = s.fps * .9 + (1000 / Math.max(1, gap)) * .1;
+    s.calls = this.renderer.info.render.calls; s.tris = this.renderer.info.render.triangles;
+    // only back-to-back frames say anything about speed; a rest in between is not a late frame
+    if (this.lastDrawSteady && !document.hidden) this.govern(gap, slot);
+    this.lastDraw = now;
+    this.lastDrawSteady = true;
   }
 
-  // The deck's casters are the arm, lid, record (during a change), lamp post, knob, fader and buttons.
-  // The platter and record spin about their own axis, so their shadows do not change while playing.
-  shadowsDirty() {
+  canRest() {
+    this.placeCamera(); this.camera.updateMatrixWorld();
+    const rest = !this.busy && !this.lively && this.accum.n >= this.accum.max && !(this.lampLevel > .003 && !reduceMotion.matches)
+      && this.shadowEpoch === this.accumEpoch && this.viewShift(this.restView) < .4;
+    if (!rest) return false;
+    this.lastDrawSteady = false;
+    return true;
+  }
+
+  // Shadows are redrawn per light, only for casters that moved: the arm, lid, record (during a change),
+  // lamp post, knob, fader, selector and buttons. The platter and record spin about their own axis, so
+  // their shadows never change while playing. Real moves redraw the big key and window maps every frame;
+  // slow ones (the arm tracking a groove) a few times a second. The stylus lamp sits low and close, so
+  // its long shadow magnifies the arm's tracking and once-per-turn sway: its map follows every frame.
+  updateShadows() {
+    const key = this.key.shadow, lamp = this.lampLight.shadow, sun = this.sun.shadow;
+    key.autoUpdate = lamp.autoUpdate = sun.autoUpdate = false;
     const cap = this.pressing ? this.pressing.cap.position.y : 0;
     const now = [this.armAngle, this.lift * 40, this.lidOpen * 60, this.recordGroup.position.y * 4, this.lampUp * 40, this.knob.rotation.y * 20, (this.fader?.position.z ?? 0) * 4, (this.selector?.rotation.y ?? 0) * 20, cap * 10, (this.lampAim?.x || 0) * 4, (this.lampAim?.z || 0) * 4, this.shadowEpoch || 0];
     const last = this.shadowSig;
-    if (last && now.every((v, i) => Math.abs(v - last[i]) < .02)) return false;
-    this.shadowSig = now;
-    return true;
+    const d = last ? Math.max(...now.map((v, i) => Math.abs(v - last[i]))) : Infinity;
+    if (d >= .02) {
+      const t = performance.now();
+      if (d > .5 || t - (this.keyShadowAt || 0) > (this.T.fps < 60 ? 250 : 125)) {
+        key.needsUpdate = sun.needsUpdate = lamp.needsUpdate = true;
+        this.keyShadowAt = t; this.shadowSig = now; this.stats.shadows++;
+      }
+    }
+    const arm = [this.armYaw.rotation.y, this.armPitch.rotation.z, this.lampLight.target.position.x, this.lampLight.target.position.z, this.lampLight.position.y];
+    if (this.lampLevel > .003 && (!this.armSig || arm.some((v, i) => Math.abs(v - this.armSig[i]) > 1e-7))) lamp.needsUpdate = true;
+    this.armSig = arm;
   }
 
   render() {
     this.placeCamera();
-    if (this.useComposer) this.composer.render(); else this.renderer.render(this.scene, this.camera);
-  }
-
-  // Keep TVs smooth: if frames run slow for a few seconds, lower resolution, then drop the AO pass.
-  adapt(dt) {
-    this.frameAvg = this.frameAvg == null ? dt : this.frameAvg * .97 + dt * .03;
-    this.adaptT = (this.adaptT || 0) + dt;
-    if (this.adaptT < 4 || this.frameAvg < 1 / 34) return;
-    this.adaptT = 0;
-    const pr = this.renderer.getPixelRatio();
-    if (pr > 1) { this.renderer.setPixelRatio(Math.max(1, pr - .5)); this.resize(); }
-    else if (this.useComposer) this.useComposer = false;
+    const T = this.T, acc = this.accum;
+    // Still frames accumulate: each one is drawn with a sub-pixel offset from a Halton sequence and
+    // averaged in. Anything moving, a light still easing, or a new look starts it over.
+    const still = !this.busy && !this.lively;
+    if (!still || this.shadowEpoch !== this.accumEpoch) acc.reset();
+    this.accumEpoch = this.shadowEpoch;
+    if (still) {
+      this.jitterI = (this.jitterI || 0) % 16 + 1;
+      const pr = this.renderer.getPixelRatio(), v = this.camera.view;
+      v.offsetX += (halton(this.jitterI, 2) - .5) / pr;
+      v.offsetY += (halton(this.jitterI, 3) - .5) / pr;
+      this.camera.updateProjectionMatrix();
+    }
+    this.camera.updateMatrixWorld();
+    this.restView = this.viewSig();
+    this.aoCheck();
+    // the edge filter runs until the accumulation has enough samples of its own
+    const filter = !still || acc.n < 3;
+    acc.enabled = still;
+    this.smaa.enabled = filter && T.aa === 'smaa';
+    this.fxaa.enabled = filter && T.aa === 'fxaa';
+    this.sharpen.enabled = this.sharpenAmount > .02;
+    this.sharpen.uniforms.amount.value = this.sharpenAmount;
+    this.renderer.info.reset();
+    this.composer.render();
   }
 
   // ---------- simulation ----------
@@ -1838,7 +2246,7 @@ export class Turntable {
       this.dust.geometry.attributes.position.needsUpdate = true;
     }
     this.strobeLevel = approach(this.strobeLevel || 0, running ? 1 : 0, 4, dt);
-    this.strobeLight.intensity = this.strobeLevel * 6;
+    this.strobeU.value = this.strobeLevel * 3;
     this.ledLevel = this.ledLevel || {};
     const setLed = (k, on, color = led) => {
       if (!this.leds[k]) return;
@@ -1881,7 +2289,7 @@ export class Turntable {
     }
 
     // full frame rate while anything moves faster than the camera drift; see loop()
-    const moving = [this.armAngle, this.lift, this.lidOpen, this.knob.rotation.y, this.fader?.position.z ?? 0, this.selector?.rotation.y ?? 0, this.lampUp, this.lampLevel, this.zoom, this.showcase, this.pointer.x, this.pointer.y];
+    const moving = [this.armAngle, this.lift, this.lidOpen, this.knob.rotation.y, this.fader?.position.z ?? 0, this.selector?.rotation.y ?? 0, this.lampUp, this.lampLevel, this.strobeLevel, Object.values(this.ledLevel).reduce((x, y) => x + y, 0), this.zoom, this.showcase, this.pointer.x, this.pointer.y];
     const prev = this.movingPrev;
     this.movingPrev = moving;
     this.busy = this.platterVel > .3 || !!this.recordSwap || !!this.regionAnim || !!this.pressing || !!this.dragArm || !!this.dragPitch || !!this.dragVol

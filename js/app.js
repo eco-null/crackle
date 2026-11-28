@@ -12,7 +12,7 @@ const body = document.body;
 const PREFS_KEY = 'vinyl.prefs.v2';
 const prefs = Object.assign({
   material: 'walnut', vinyl: 'black', room: 'cream', lyrics: true, lid: false, focus: false, focusLyrics: false,
-  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver', layout: 'classic', volume: .8, ytPanel: false, ytGhost: false,
+  clock: false, motion: true, glow: true, blur: 8, rpm: 33, metal: 'silver', layout: 'classic', quality: 'auto', volume: .8, ytPanel: false, ytGhost: false,
 }, (() => { try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; } })());
 const save = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch { /* private mode */ } };
 // rooms renamed when the photographed set replaced the first backdrops
@@ -93,7 +93,50 @@ tt.setSpeed(prefs.rpm);
 tt.onLabel = (color) => {
   document.documentElement.style.setProperty('--album', color || 'transparent');
   body.classList.toggle('glow', !!color && prefs.glow);
+  rebake(true);
 };
+
+// ---------- picture quality ----------
+const QUALITY = [['auto', 'Auto'], ['high', 'High'], ['balanced', 'Balanced'], ['low', 'Battery']];
+const TIER_NAME = { high: 'high', balanced: 'balanced', low: 'battery' };
+function qualityNote() {
+  const pct = Math.round(tt.renderer.getPixelRatio() / Math.min(devicePixelRatio || 1, tt.T.dpr) * 100);
+  $('#quality-note').textContent = prefs.quality === 'auto'
+    ? `Auto picked ${TIER_NAME[tt.tier]}${pct < 99 ? `, drawn at ${pct} %` : ''}. It lowers the resolution if frames run late and raises it again when there is room.`
+    : 'Fixed. Auto adapts to the device instead.';
+}
+// the lighter tiers also drop the live blur behind the glass panels: the browser redoes it every frame
+// over the moving deck, which costs a TV or a phone more than the deck itself
+tt.onTier = (tier) => { body.classList.toggle('fx-lite', tier !== 'high'); qualityNote(); };
+tt.onScale = () => qualityNote();
+tt.setQuality(prefs.quality);
+
+// ?debug: frame rate, GPU and CPU time, draw calls, what the quality system decided
+if (new URLSearchParams(location.search).has('debug')) {
+  window.tt = tt;                 // for poking at it from the console
+  const hud = document.createElement('pre');
+  hud.id = 'hud';
+  document.body.append(hud);
+  let prev = { ...tt.stats }, at = performance.now();
+  setInterval(() => {
+    const s = tt.stats, now = performance.now(), sec = (now - at) / 1000;
+    const per = (k) => ((s[k] - prev[k]) / sec).toFixed(1);
+    const drawn = s.drawn - prev.drawn, rested = s.skipped - prev.skipped;
+    const cv = tt.renderer.domElement;
+    hud.textContent = [
+      `tier     ${tt.tier}${tt.quality === 'auto' ? ' (auto)' : ''}   scale ${Math.round([1, .85, .72, .6][tt.scaleIx] * 100)}%`,
+      `pixels   ${tt.renderer.getPixelRatio().toFixed(2)}x  ${cv.width}x${cv.height}  dpr ${devicePixelRatio}`,
+      `fps      ${s.fps.toFixed(0)}  refresh ${tt.refreshHz || '?'} Hz`,
+      `gpu      ${s.gpu == null ? 'n/a' : s.gpu.toFixed(2) + ' ms'}   cpu ${s.cpu.toFixed(2)} ms`,
+      `calls    ${s.calls}   tris ${(s.tris / 1000).toFixed(0)}k`,
+      `aa       ${tt.T.msaa ? 'msaa' + tt.T.msaa : tt.T.aa}${tt.accum.enabled ? `  accum ${tt.accum.n}/${tt.accum.max}` : ''}${tt.sharpen.enabled ? `  sharpen ${tt.sharpenAmount.toFixed(2)}` : ''}`,
+      `ao       ${tt.ao.enabled ? per('ao') + '/s' : 'off'}   shadows ${per('shadows')}/s`,
+      `drawn    ${(drawn / sec).toFixed(1)}/s   resting ${drawn + rested ? Math.round(rested / (drawn + rested) * 100) : 0}%`,
+      `build    ${s.build} ms   programs ${tt.renderer.info.programs?.length}`,
+    ].join('\n');
+    prev = { ...s }; at = now;
+  }, 500);
+}
 
 function placeDeck(instant = false) {
   const r = $('#deck-zone').getBoundingClientRect();
@@ -120,6 +163,67 @@ function cycle(list, key, dir = 1, label) {
 }
 
 // ---------- room ----------
+// The photo is blurred and given the cover's glow once, into a picture, instead of the browser blurring
+// a full-screen layer and soft-light blending a glow under the live deck on every frame.
+const canBake = (() => {
+  try { const g = document.createElement('canvas').getContext('2d'); g.filter = 'blur(2px)'; return g.filter === 'blur(2px)'; } catch { return false; }
+})();
+let roomPhoto = null, bakeTimer, bakeSeq = 0;
+const bakedUrls = new Set();
+function bakeRoom(img) {
+  // .room-img is inset by -4 %; background-size: cover gives CSS px per photo px
+  const W = innerWidth * 1.08, H = innerHeight * 1.08, nw = img.naturalWidth, nh = img.naturalHeight;
+  const cover = Math.max(W / nw, H / nh), blur = prefs.blur;
+  const cw = blur >= 6 ? 960 : blur >= 2 ? 1440 : nw, k = cw / nw, ch = Math.round(nh * k);
+  const r = blur * k / cover, pad = Math.ceil(r * 3) + 1;
+  // a bleed around the photo, so the blur never pulls transparency in from the edges
+  const src = document.createElement('canvas'); src.width = cw + 2 * pad; src.height = ch + 2 * pad;
+  const sg = src.getContext('2d');
+  sg.drawImage(img, 0, 0, src.width, src.height);
+  sg.drawImage(img, pad, pad, cw, ch);
+  const cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+  const g = cv.getContext('2d');
+  g.filter = `blur(${r.toFixed(2)}px) saturate(1.04)`;
+  g.drawImage(src, -pad, -pad);
+  g.filter = 'none';
+  const album = getComputedStyle(document.documentElement).getPropertyValue('--album').trim();
+  if (prefs.glow && album && album !== 'transparent') {
+    // the same glow as .room-glow: soft-light, 55 %, an ellipse 48 % x 60 % at 66 % 48 %
+    g.fillStyle = album; const solid = g.fillStyle;
+    g.save();
+    g.globalCompositeOperation = 'soft-light'; g.globalAlpha = .55;
+    g.translate(cw * .66, ch * .48); g.scale(1, (.6 * ch) / (.48 * cw));
+    const gr = g.createRadialGradient(0, 0, 0, 0, 0, .48 * cw);
+    gr.addColorStop(0, solid); gr.addColorStop(.7, solid.startsWith('#') ? `${solid}00` : 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(-cw * 2, -ch * 4, cw * 4, ch * 8);
+    g.restore();
+  }
+  return new Promise((res) => cv.toBlob((b) => res(b ? URL.createObjectURL(b) : null), 'image/jpeg', .9));
+}
+// show a newly baked backdrop: crossfaded for a new room or cover, straight away while dragging the blur
+function showRoom(url, fade) {
+  const layers = $('#room').querySelectorAll('.room-img');
+  const [shown, hidden] = layers[0].classList.contains('on') ? [layers[0], layers[1]] : [layers[1], layers[0]];
+  const target = fade ? hidden : shown;
+  const old = target.dataset.url;
+  target.style.backgroundImage = `url("${url}")`;
+  target.dataset.url = url;
+  if (fade) { hidden.classList.add('on'); shown.classList.remove('on'); }
+  if (old && bakedUrls.has(old)) setTimeout(() => { URL.revokeObjectURL(old); bakedUrls.delete(old); }, 2000);
+}
+function rebake(fade, delay = 60) {
+  if (!canBake || !roomPhoto) return;
+  clearTimeout(bakeTimer);
+  bakeTimer = setTimeout(async () => {
+    const seq = ++bakeSeq, photo = roomPhoto, url = await bakeRoom(photo);
+    if (!url) return;
+    bakedUrls.add(url);
+    if (seq !== bakeSeq || photo !== roomPhoto) { URL.revokeObjectURL(url); bakedUrls.delete(url); return; }
+    showRoom(url, fade);
+  }, delay);
+}
+addEventListener('resize', () => rebake(false, 400));
+
 function applyRoom() {
   const room = ROOMS.find((r) => r.id === prefs.room) || ROOMS[0];
   const el = $('#room');
@@ -129,16 +233,16 @@ function applyRoom() {
   tt.setRoom({ id: room.id, img: room.img ? asset(room.img) : null, light: room.light });
   document.querySelector('meta[name=theme-color]').content = room.tone === 'light' ? '#efe9df' : '#17130f';
   document.documentElement.style.setProperty('--blur', `${prefs.blur}px`);
+  el.classList.toggle('baked', canBake);
   if (room.img) {
-    const layers = el.querySelectorAll('.room-img');
-    const [shown, hidden] = layers[0].classList.contains('on') ? [layers[0], layers[1]] : [layers[1], layers[0]];
     const img = new Image();
     img.onload = () => {
-      hidden.style.backgroundImage = `url("${img.src}")`;
-      hidden.classList.add('on'); shown.classList.remove('on');
+      if ((ROOMS.find((r) => r.id === prefs.room) || ROOMS[0]) !== room) return;   // another room was picked meanwhile
+      roomPhoto = img;
+      if (canBake) rebake(true, 0); else showRoom(img.src, true);
     };
     img.src = asset(room.img);
-  }
+  } else roomPhoto = null;
   document.querySelectorAll('.room-card').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.id === room.id)));
 }
 
@@ -590,6 +694,18 @@ function buildSheets() {
     b.addEventListener('click', () => { prefs.layout = id; save(); applyLook(); });
     $('#layouts').append(b);
   }
+  for (const [id, name] of QUALITY) {
+    const b = document.createElement('button');
+    b.className = 'vinyl-chip text-chip'; b.dataset.id = id; b.setAttribute('role', 'radio'); b.textContent = name;
+    b.setAttribute('aria-checked', String(prefs.quality === id));
+    b.addEventListener('click', () => {
+      prefs.quality = id; save();
+      tt.setQuality(id);
+      applyLook();               // the wood scans come at the tier's resolution
+      document.querySelectorAll('#quality .text-chip').forEach((c) => c.setAttribute('aria-checked', String(c.dataset.id === id)));
+    });
+    $('#quality').append(b);
+  }
   for (const v of VINYLS) {
     const b = document.createElement('button');
     b.className = 'vinyl-chip'; b.dataset.id = v.id; b.setAttribute('role', 'radio');
@@ -623,9 +739,9 @@ function buildSheets() {
   bind('#o-ytpanel', 'ytPanel', layoutYt);
   bind('#o-ytghost', 'ytGhost', layoutYt);
   bind('#o-motion', 'motion', () => { tt.followPointer = prefs.motion; });
-  bind('#o-glow', 'glow', () => body.classList.toggle('glow', prefs.glow && !!tt.albumColor));
+  bind('#o-glow', 'glow', () => { body.classList.toggle('glow', prefs.glow && !!tt.albumColor); rebake(true); });
   $('#o-blur').value = prefs.blur;
-  $('#o-blur').addEventListener('input', (e) => { prefs.blur = +e.target.value; save(); document.documentElement.style.setProperty('--blur', `${prefs.blur}px`); });
+  $('#o-blur').addEventListener('input', (e) => { prefs.blur = +e.target.value; save(); document.documentElement.style.setProperty('--blur', `${prefs.blur}px`); rebake(false, 120); });
 
   $('#sp-redirect').textContent = spotify.redirectUri;
   $('#sp-client').value = spotify.clientId;

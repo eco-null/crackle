@@ -75,6 +75,9 @@ svg { stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-lin
   mix-blend-mode: soft-light; transition: opacity 1.2s var(--ease), background 1.2s var(--ease);
 }
 body.glow .room-glow { opacity: .55; }
+/* baked backdrop: blur and glow are already in the picture (see bakeRoom) */
+#room.baked .room-img { filter: none; }
+#room.baked:not(.plain) .room-glow { display: none; }
 .room-veil { position: absolute; inset: 0; background: var(--veil); transition: opacity .8s var(--ease); }
 body.focus .room-veil { opacity: .35; }
 
@@ -453,4 +456,15 @@ body.searching #top { z-index: 9; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------- quality ---------- */
+.text-chip { padding: 0 .95rem; }
+.q-note { margin: .6rem 0 0; font-size: .72rem; line-height: 1.45; color: var(--ink-3); }
+/* the lighter tiers keep the glass but drop the live blur behind it, redone every frame over the deck */
+body.fx-lite .glass, body.fx-lite #zoom-level, body.fx-lite dialog::backdrop { -webkit-backdrop-filter: none; backdrop-filter: none; }
+body.fx-lite .glass { background: radial-gradient(120% 80% at 20% 0%, var(--glass-sheen), transparent 55%), var(--glass-strong); }
+#hud {
+  position: fixed; right: 12px; top: 60px; z-index: 50; margin: 0; padding: .6rem .75rem; border-radius: 10px;
+  font: 11px/1.5 var(--mono); color: #e9e5dd; background: rgba(9, 9, 11, .78); pointer-events: none; white-space: pre;
 }
