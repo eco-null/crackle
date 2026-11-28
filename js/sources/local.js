@@ -13,7 +13,8 @@ export class LocalSource {
     for (const ev of ['play', 'pause', 'timeupdate', 'loadedmetadata', 'seeked']) {
       this.audio.addEventListener(ev, () => this.emit());
     }
-    this.audio.addEventListener('ended', () => { if (this.index < this.queue.length - 1) this.next(); else this.emit(); });
+    // the page's queue goes first (onEnded answers true when it played something), then this list
+    this.audio.addEventListener('ended', () => { if (this.onEnded?.()) return; if (this.index < this.queue.length - 1) this.next(); else this.emit(); });
     this.audio.addEventListener('error', () => this.onStatus?.('local', 'error', 'This audio cannot be played.'));
   }
 

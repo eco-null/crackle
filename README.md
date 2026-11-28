@@ -61,6 +61,14 @@ Only the record. Scroll to move in close to the needle. One button brings the ly
 
 Search covers Spotify (when connected) and YouTube in one box. Synced lyrics come from [LRCLIB](https://lrclib.net).
 
+With Spotify it works like the app:
+- **Your library in the search box.** Click into it with nothing typed and your playlists, saved albums and Liked Songs are there; typing finds them first, then songs, artists, albums and playlists.
+- **Links.** Paste any Spotify link (song, album, playlist, artist) or a YouTube link and it plays.
+- **A queue.** Right-click a result, press its **+** or Shift+Enter to add it; the queue button in the dock (or Q) shows what plays next. Next skips to the queue first.
+- **It keeps playing.** When an album, a playlist or a single song runs out, more songs around the artist follow, so the music doesn't stop.
+
+Accounts connected before the library arrived need to connect once more to show their playlists.
+
 YouTube videos play in a small card you can drag anywhere. Two optional settings in **Sources → YouTube**, both off by default:
 - **In place of the cover:** the video takes the cover's spot in the panel.
 - **Ghost video:** at full zoom in focus mode, the clip floats see-through over the record. This places the page in front of YouTube's player, which YouTube's embed policies don't allow, so it stays opt-in.
@@ -88,6 +96,7 @@ YouTube videos play in a small card you can drag anywhere. Two optional settings
 | V | Next pressing | 3 4 7 | 33⅓ / 45 / 78 rpm |
 | R | Next room | Enter | Full screen |
 | S | Sources | Esc | Close a panel |
+| Q | Queue | Shift+Enter | Add the selected result to the queue |
 
 ## Install it as an app
 

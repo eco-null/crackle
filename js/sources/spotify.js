@@ -11,7 +11,21 @@ const API = 'https://api.spotify.com/v1';
 const SCOPES = [
   'streaming', 'user-read-email', 'user-read-private',
   'user-read-playback-state', 'user-modify-playback-state', 'user-read-currently-playing',
+  'playlist-read-private', 'playlist-read-collaborative', 'user-library-read',
 ].join(' ');
+const LIBRARY_SCOPE = 'playlist-read-private';
+
+// open.spotify.com links (with or without an intl-xx part) and spotify: URIs
+export function parseSpotify(text) {
+  const m = String(text).match(/open\.spotify\.com\/(?:intl-[\w-]+\/)?(track|album|playlist|artist|episode|show)\/([A-Za-z0-9]{22})/)
+    || String(text).match(/spotify:(track|album|playlist|artist|episode|show):([A-Za-z0-9]{22})/);
+  return m ? { type: m[1], id: m[2], uri: `spotify:${m[1]}:${m[2]}` } : null;
+}
+const img = (images, small) => {
+  const list = (images || []).filter(Boolean);
+  const pick = small ? list.at(-1) : list[0];
+  return pick?.url?.startsWith('https://') ? pick.url : '';
+};
 const K = { client: 'vinyl.spotify.client', tok: 'vinyl.spotify.token', ver: 'vinyl.spotify.verifier' };
 
 const store = {
@@ -41,6 +55,8 @@ export class SpotifySource {
   // the site ships with its own client ID: visitors only see a login button, never app setup
   get builtIn() { return /^[0-9a-f]{32}$/i.test(SPOTIFY_CLIENT_ID); }
   get redirectUri() { return redirectUri(); }
+  // connected before the library scopes existed: playlists need one more sign-in
+  get needsReconnect() { return this.connected && !String(store.get(K.tok)?.scope || '').includes(LIBRARY_SCOPE); }
 
   async login() {
     if (!/^[0-9a-f]{32}$/i.test(this.clientId)) throw new Error('Add a valid Spotify client ID first.');
@@ -365,7 +381,11 @@ export class SpotifySource {
     this.sdkActive = true;
     this.lastSdkAt = Date.now();
     const t = s.track_window.current_track;
-    this.feedRadio(t.linked_from?.uri || t.uri, (t.artists || []).map((a) => a.name).join(', '));
+    // the player reports changes, not time passing: check again half a minute before the end
+    const left = s.duration - s.position;
+    clearTimeout(this.keepTimer);
+    if (!s.paused && left > 30000) this.keepTimer = setTimeout(() => this.keepPlaying(t, 29000, true), left - 29500);
+    this.keepPlaying(t, left, !s.paused, s.track_window.next_tracks?.length);
     this.onState(this.mapTrack({
       id: t.id || t.uri, name: t.name, artists: t.artists, album: t.album, duration_ms: s.duration,
     }, { playing: !s.paused, position: s.position, device: 'this screen' }));
@@ -389,7 +409,7 @@ export class SpotifySource {
           // follow volume changes made in the Spotify app
           if (typeof p.device?.volume_percent === 'number' && p.device.id !== this.deviceId) this.onVolume?.(p.device.volume_percent / 100);
           this.onState(this.mapTrack(p.item, { playing: p.is_playing, position: p.progress_ms, device: p.device?.name || '' }));
-          this.feedRadio(p.item.linked_from?.uri || p.item.uri, (p.item.artists || []).map((a) => a.name).join(', '));
+          this.keepPlaying(p.item, (p.item.duration_ms || 0) - (p.progress_ms || 0), p.is_playing);
         } else {
           this.onStatus?.('spotify', 'idle');
           this.onState({ source: 'spotify', track: null, playing: false, position: 0 });
@@ -425,44 +445,130 @@ export class SpotifySource {
     };
   }
 
-  async search(q) {
-    const j = await this.api(`/search?type=track&limit=10&q=${encodeURIComponent(q)}`);
-    return (j?.tracks?.items || []).map((t) => ({
-      source: 'spotify', uri: t.uri, title: t.name, artist: t.artists.map((a) => a.name).join(', '),
-      album: t.album?.name || '', art: t.album?.images?.[0]?.url || '', thumb: t.album?.images?.at(-1)?.url || '',
-    }));
+  // ---------- search and library ----------
+  mapItem(x, kind) {
+    if (!x) return null;
+    if (kind === 'track') {
+      return { source: 'spotify', kind, uri: x.uri, title: x.name, artist: (x.artists || []).map((a) => a.name).join(', '),
+        album: x.album?.name || '', art: img(x.album?.images), thumb: img(x.album?.images, true), duration: x.duration_ms || 0 };
+    }
+    const sub = kind === 'album' ? `Album · ${(x.artists || []).map((a) => a.name).join(', ')}`
+      : kind === 'playlist' ? `Playlist · ${x.owner?.display_name || 'Spotify'}`
+      : kind === 'artist' ? 'Artist' : '';
+    return { source: 'spotify', kind, uri: x.uri, id: x.id, title: x.name, artist: sub, album: '', art: img(x.images), thumb: img(x.images, true) };
   }
 
+  // songs, albums, playlists and artists, like the app's search (ten of each: Spotify's limit for apps
+  // in development mode)
+  async search(q) {
+    const j = await this.api(`/search?type=track,album,playlist,artist&limit=10&q=${encodeURIComponent(q)}`);
+    const of = (key, kind) => (j?.[key]?.items || []).map((x) => this.mapItem(x, kind)).filter(Boolean);
+    return { tracks: of('tracks', 'track'), albums: of('albums', 'album'), playlists: of('playlists', 'playlist'), artists: of('artists', 'artist') };
+  }
+
+  // the account's own playlists (made and followed), saved albums and Liked Songs; kept for a few minutes
+  async library(fresh = false) {
+    if (this.needsReconnect) return null;
+    if (!fresh && this.lib && Date.now() - this.lib.at < 5 * 60 * 1000) return this.lib.items;
+    const pages = async (path, max) => {
+      const out = [];
+      for (let url = path; url && out.length < max;) {
+        const j = await this.api(url);
+        out.push(...(j?.items || []));
+        url = j?.next ? j.next.replace(API, '') : null;
+      }
+      return out;
+    };
+    const [lists, albums] = await Promise.all([pages('/me/playlists?limit=50', 300), pages('/me/albums?limit=50', 150).catch(() => [])]);
+    const items = [
+      { source: 'spotify', kind: 'liked', uri: 'liked', title: 'Liked Songs', artist: 'Playlist · your saved songs', album: '', art: '', thumb: '' },
+      ...lists.map((x) => this.mapItem(x, 'playlist')),
+      ...albums.map((x) => this.mapItem(x?.album, 'album')),
+    ].filter(Boolean);
+    this.lib = { at: Date.now(), items };
+    return items;
+  }
+
+  // the tracks of an album, playlist or Liked Songs (for adding them to the queue)
+  async tracksOf(item, max = 50) {
+    if (item.kind === 'track') return [item.uri];
+    if (item.kind === 'liked') return ((await this.api(`/me/tracks?limit=${Math.min(50, max)}`))?.items || []).map((x) => x.track?.uri).filter(Boolean);
+    if (item.kind === 'album') return ((await this.api(`/albums/${item.id}/tracks?limit=${Math.min(50, max)}`))?.items || []).map((x) => x.uri);
+    if (item.kind === 'playlist') {
+      // the newer endpoint first, the older one where an account still answers on it
+      const j = await this.api(`/playlists/${item.id}/items?limit=${Math.min(50, max)}`).catch(() => this.api(`/playlists/${item.id}/tracks?limit=${Math.min(50, max)}`));
+      return (j?.items || []).map((x) => (x.item || x.track)?.uri).filter((u) => u?.startsWith('spotify:track:') || u?.startsWith('spotify:episode:'));
+    }
+    return [];
+  }
+
+  // ---------- playing ----------
   // Plays on this screen when the Web Playback SDK is ready, otherwise on the account's active device.
-  // Spotify plays a list of tracks and stops at its end. Crackle keeps a radio going instead: the
-  // chosen song, then the other results of the same search, and before that runs out it queues more
-  // songs around the artist now playing (the recommendation endpoints are closed to apps like this).
-  async playUri(uri, more = []) {
-    const list = [uri, ...more.filter((u) => u && u !== uri)].slice(0, 12);
-    this.radio = { order: list, seen: new Set(list), extending: false };
-    await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: list } }));
+  async playUri(uri) {
+    this.seen = new Set([uri]);
+    await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris: [uri] } }));
     setTimeout(() => this.poll(), 600);
   }
 
-  // called on every track change: two songs before the radio runs dry, queue more
-  async feedRadio(uri, artist) {
-    const r = this.radio;
-    if (!r || r.extending || !uri) return;
-    const at = r.order.indexOf(uri);
-    if (at < 0 || at < r.order.length - 2) return;
-    r.extending = true;
+  // an album, playlist or artist as Spotify plays it (in order, then on); Liked Songs as its first fifty
+  async playItem(item) {
+    if (item.kind === 'track' || item.kind === 'episode' || !item.kind) return this.playUri(item.uri);
+    this.seen = new Set();
+    if (item.kind === 'liked') {
+      const uris = await this.tracksOf(item);
+      if (!uris.length) throw new Error('No liked songs yet.');
+      await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { uris } }));
+    } else {
+      await this.withDevice((id) => this.api(`/me/player/play?device_id=${id}`, { method: 'PUT', body: { context_uri: item.uri } }));
+    }
+    setTimeout(() => this.poll(), 600);
+  }
+
+  // Spotify's own queue: what plays next on the account
+  async queue() {
+    const j = await this.api('/me/player/queue');
+    return (j?.queue || []).map((x) => this.mapItem(x, 'track')).filter(Boolean);
+  }
+
+  async addToQueue(item) {
+    const uris = await this.tracksOf(item, 30);
+    for (const u of uris) await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' });
+    return uris.length;
+  }
+
+  // Never stop, like the app: half a minute before the end of a song, if nothing is lined up after it
+  // (the end of an album, a playlist or a single song), queue a few songs around the artist playing.
+  // Spotify's recommendation and radio endpoints are closed to apps like this one, so the songs come
+  // from the artist and from searches on them. Checked once per song.
+  async keepPlaying(item, remaining, playing, nextKnown) {
+    const uri = item?.linked_from?.uri || item?.uri;
+    if (!uri || !playing || !(remaining < 30000) || this.keepChecked === uri || this.keeping) return;
+    this.keepChecked = uri;
+    this.keeping = true;
     try {
-      const name = (artist || '').split(',')[0].trim();
-      const found = [...await this.search(`artist:"${name}"`).catch(() => []), ...await this.search(name).catch(() => [])];
-      const add = [...new Set(found.map((x) => x.uri))].filter((u) => !r.seen.has(u)).slice(0, 6);
-      for (const u of add) {
-        await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' });
-        r.seen.add(u); r.order.push(u);
+      this.seen = this.seen || new Set();
+      this.seen.add(uri);
+      const lined = nextKnown ?? (await this.queue().catch(() => [])).length;
+      if (lined > 0) return;
+      const artists = (item.artists || []).map((a) => a.name).filter(Boolean);
+      const pool = [];
+      for (const q of [`artist:"${artists[0]}"`, artists.slice(0, 2).join(' '), item.album?.name ? `${artists[0]} ${item.album.name}` : '']) {
+        if (!q || !artists[0]) continue;
+        pool.push(...((await this.search(q).catch(() => null))?.tracks || []));
       }
+      const names = new Set([String(item.name).toLowerCase()]);
+      const pick = [];
+      for (const t of pool.sort(() => Math.random() - .5)) {
+        const n = t.title.toLowerCase();
+        if (this.seen.has(t.uri) || names.has(n)) continue;
+        names.add(n); pick.push(t.uri);
+        if (pick.length >= 4) break;
+      }
+      for (const u of pick) { await this.api(`/me/player/queue?uri=${encodeURIComponent(u)}`, { method: 'POST' }); this.seen.add(u); }
     } catch (e) {
-      console.warn('[crackle] could not extend the radio', e.message);
+      console.warn('[crackle] could not keep the music going', e.message);
     } finally {
-      r.extending = false;
+      this.keeping = false;
     }
   }
 

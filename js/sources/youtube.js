@@ -124,6 +124,8 @@ export class YouTubeSource {
     const p = this.player;
     if (!p?.getPlayerState) return;
     const st = p.getPlayerState();           // -1 unstarted, 0 ended, 1 playing, 2 paused, 3 buffering, 5 cued
+    if (st === 0 && this.lastSt !== 0) this.onEnded?.();
+    this.lastSt = st;
     const data = p.getVideoData?.() || {};
     if (!data.video_id) return;
     const { artist, title } = splitTitle(data.title || '', data.author || '');

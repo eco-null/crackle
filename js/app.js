@@ -1,6 +1,6 @@
 import { Turntable, LAYOUTS } from './deck3d.js';
 import { MATERIALS, VINYLS, ROOMS, METALS, asset } from './materials.js';
-import { SpotifySource } from './sources/spotify.js';
+import { SpotifySource, parseSpotify } from './sources/spotify.js';
 import { YouTubeSource, parseYouTube, searchYouTube } from './sources/youtube.js';
 import { LocalSource } from './sources/local.js';
 import { fetchLyrics } from './lyrics.js';
@@ -260,6 +260,7 @@ function swapText(el, text) {
 
 function onTrackChange() {
   const t = state.track;
+  setTimeout(refreshQueue, 800);
   body.classList.toggle('has-track', !!t);
   const cover = $('#cover'), img = cover.querySelector('img');
   if (!t) {
@@ -395,6 +396,7 @@ function frame(now) {
   }
   if (now - lastText > 200) {
     lastText = now;
+    queueTick(pos);
     if (t) {
       ui.pos.textContent = fmt(pos);
       ui.dur.textContent = t.duration ? fmt(t.duration) : 'live';
@@ -421,7 +423,7 @@ function togglePlay() {
   if (active === spotify) spotify.prime();
   run(() => active.toggle(wasPlaying));
 }
-const next = () => active && run(() => active.next());
+const next = () => { if (playNextQueued()) return; if (active) run(() => active.next()); };
 const prev = () => active && run(() => active.prev());
 
 // ---------- search: previews without an account, Spotify when connected, links ----------
@@ -436,15 +438,30 @@ async function itunes(q, signal) {
     art: (x.artworkUrl100 || '').replace(/\/\d+x\d+bb\./, '/1000x1000bb.'),
   }));
 }
-const GROUPS = { spotify: 'Spotify', youtube: 'YouTube', preview: '30-second previews' };
+const GROUPS = { library: 'Your library', spotify: 'Songs', artist: 'Artists', album: 'Albums', playlist: 'Playlists', youtube: 'YouTube', preview: '30-second previews' };
+const groupOf = (r) => r.group || (r.source === 'spotify' ? (r.kind === 'track' ? 'spotify' : r.kind) : r.source);
+// Liked Songs has no cover of its own: the app's violet tile with a heart
+const LIKED_ART = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4a2fc9"/><stop offset="1" stop-color="#b9a9f0"/></linearGradient></defs><rect width="64" height="64" fill="url(#g)"/><path d="M32 45s-12-7.3-12-15.2A6.8 6.8 0 0 1 32 26a6.8 6.8 0 0 1 12 3.8C44 37.7 32 45 32 45z" fill="#fff"/></svg>')}`;
+const artOf = (r, big) => (r.kind === 'liked' ? LIKED_ART : big ? r.art || r.thumb : r.thumb || r.art);
+const queueable = (r) => !r.act && r.kind !== 'artist';
+function rowFor(r) {
+  const img = document.createElement('img'); img.alt = ''; img.loading = 'lazy';
+  const src = artOf(r); if (src) img.src = src;
+  if (r.kind === 'artist') img.className = 'round';
+  const t = document.createElement('div'); t.className = 't';
+  const b = document.createElement('b'); b.textContent = r.title;
+  const s = document.createElement('small'); s.textContent = [r.artist, r.album].filter(Boolean).join(' · ');
+  t.append(b, s);
+  return [img, t];
+}
 function renderResults(note) {
   const ul = $('#results');
   ul.replaceChildren();
   if (note) { const li = document.createElement('li'); li.className = 'note'; li.textContent = note; ul.append(li); }
   let group = '';
   results.forEach((r, i) => {
-    if (r.source !== group) {
-      group = r.source;
+    if (groupOf(r) !== group) {
+      group = groupOf(r);
       const h = document.createElement('li'); h.className = 'group'; h.setAttribute('role', 'presentation'); h.textContent = GROUPS[group] || group;
       ul.append(h);
     }
@@ -452,13 +469,18 @@ function renderResults(note) {
     li.setAttribute('role', 'option');
     li.dataset.i = i;
     li.setAttribute('aria-selected', String(i === sel));
-    const img = document.createElement('img'); img.alt = ''; img.loading = 'lazy'; if (r.thumb || r.art) img.src = r.thumb || r.art;
-    const t = document.createElement('div'); t.className = 't';
-    const b = document.createElement('b'); b.textContent = r.title;
-    const s = document.createElement('small'); s.textContent = [r.artist, r.album].filter(Boolean).join(' · ');
-    t.append(b, s);
-    li.append(img, t);
-    li.addEventListener('pointerdown', (e) => { e.preventDefault(); choose(i); });
+    li.append(...rowFor(r));
+    if (queueable(r)) {
+      const add = document.createElement('button');
+      add.className = 'q-add'; add.type = 'button'; add.tabIndex = -1;
+      add.setAttribute('aria-label', 'Add to queue'); add.title = 'Add to queue  (right-click, or Shift+Enter)';
+      add.innerHTML = '<svg><use href="#i-plus"/></svg>';
+      add.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); if (e.button === 0) addToQueue(r); });
+      li.append(add);
+    }
+    // a right click queues, like the app's context menu; only the main button plays
+    li.addEventListener('pointerdown', (e) => { e.preventDefault(); if (e.button === 0) choose(i); });
+    li.addEventListener('contextmenu', (e) => { e.preventDefault(); if (queueable(r)) addToQueue(r); });
     ul.append(li);
   });
   const open = !!note || results.length > 0;
@@ -488,13 +510,22 @@ async function search(q) {
   try {
     // Spotify (full songs) when connected, YouTube always; 30 s previews only without Spotify
     const quiet = (p) => p.catch((e) => { if (e.name === 'AbortError') throw e; return []; });
-    const [sp, yt, it] = await Promise.all([
-      spotify.connected ? quiet(spotify.search(q)) : [],
+    const [sp, mine, yt, it] = await Promise.all([
+      spotify.connected ? quiet(spotify.search(q)) : null,
+      spotify.connected && !spotify.needsReconnect ? quiet(spotify.library()) : [],
       quiet(searchYouTube(q, signal, 8)),
       spotify.connected ? [] : quiet(itunes(q, signal)),
     ]);
     if (signal.aborted) return;
-    results = [...sp, ...yt, ...it];
+    // like the app: your own playlists and albums that match first, then songs, artists, albums, playlists
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const hits = (mine || []).filter((x) => words.every((w) => x.title.toLowerCase().includes(w))).slice(0, 6).map((x) => ({ ...x, group: 'library' }));
+    const own = new Set(hits.map((x) => x.uri));
+    results = [
+      ...hits, ...(sp?.tracks || []), ...(sp?.artists || []).slice(0, 3),
+      ...(sp?.albums || []).filter((x) => !own.has(x.uri)).slice(0, 4), ...(sp?.playlists || []).filter((x) => !own.has(x.uri)).slice(0, 4),
+      ...yt, ...it,
+    ];
     sel = results.length ? 0 : -1;
     renderResults(results.length ? '' : 'Nothing found.');
   } catch (e) {
@@ -506,18 +537,39 @@ function choose(i) {
   const r = results[i];
   if (!r) return;
   const list = results.filter((x) => x.source === 'preview');
-  const radio = results.filter((x) => x.source === 'spotify').map((x) => x.uri);   // what plays after it
   closeResults();
   $('#q').value = '';
   $('#q').blur();
+  play(r, list);
+}
+// plays a result, a library item, a link or a queued song; previews play on through their search's list
+let playAskedAt = -1e9;
+function play(r, list = [r]) {
+  if (r.act) { r.act(); return; }
+  playAskedAt = performance.now();
   if (r.source === 'spotify') {
+    if (!spotify.connected) { toast('Connect Spotify to play Spotify links.', true); openSheet('sources'); return; }
     spotify.prime();
-    run(async () => { activate(spotify); spotify.start(); await spotify.playUri(r.uri, radio); });
+    run(async () => { activate(spotify); spotify.start(); await spotify.playItem(r); });
   } else if (r.source === 'youtube') {
     run(async () => { activate(youtube); await youtube.load(r.id); });
   } else {
-    run(async () => { activate(local); await local.loadItems(list, list.indexOf(r), 'preview'); });
+    const items = list.includes(r) ? list : [r];
+    run(async () => { activate(local); await local.loadItems(items, items.indexOf(r), 'preview'); });
   }
+}
+// With an empty search box, the box shows your library: Liked Songs, your playlists and saved albums
+async function showLibrary() {
+  if (!spotify.connected || $('#q').value.trim()) return;
+  if (spotify.needsReconnect) {
+    results = [{ source: 'spotify', kind: 'liked', group: 'library', title: 'Show your playlists here', artist: 'Connect Spotify once more to allow it', act: () => spotify.login() }];
+    sel = -1; renderResults(); return;
+  }
+  const items = await spotify.library().catch(() => null);
+  if (!items?.length || $('#q').value.trim() || document.activeElement !== $('#q')) return;
+  results = items.slice(0, 60).map((x) => ({ ...x, group: 'library' }));
+  sel = -1;
+  renderResults();
 }
 function submitQuery(text) {
   const q = text.trim();
@@ -527,20 +579,25 @@ function submitQuery(text) {
     run(async () => { activate(youtube); await youtube.load(q); });
     return;
   }
-  const sp = q.match(/open\.spotify\.com\/(?:intl-\w+\/)?track\/([A-Za-z0-9]{22})|spotify:track:([A-Za-z0-9]{22})/);
+  // any Spotify link: a song or episode plays, an album, playlist, artist or show plays from its start
+  const sp = parseSpotify(q);
   if (sp) {
-    closeResults(); $('#q').value = '';
-    if (!spotify.connected) { toast('Connect Spotify to play Spotify links.', true); openSheet('sources'); return; }
-    spotify.prime();
-    run(async () => { activate(spotify); spotify.start(); await spotify.playUri(`spotify:track:${sp[1] || sp[2]}`); });
+    closeResults(); $('#q').value = ''; $('#q').blur();
+    play({ source: 'spotify', kind: sp.type === 'show' ? 'playlist' : sp.type, uri: sp.uri, id: sp.id, title: '' });
     return;
   }
   if (sel >= 0) choose(sel); else search(q);
 }
+$('#q').addEventListener('focus', () => showLibrary());
+// a pasted link opens at once
+$('#q').addEventListener('paste', () => setTimeout(() => {
+  const q = $('#q').value.trim();
+  if (parseSpotify(q) || parseYouTube(q)) submitQuery(q);
+}, 0));
 $('#q').addEventListener('input', (e) => {
   const q = e.target.value.trim();
   clearTimeout(searchTimer);
-  if (!q) { closeResults(); return; }
+  if (!q) { closeResults(); showLibrary(); return; }
   if (/^https?:|^spotify:|youtu/.test(q)) { closeResults(); return; }
   searchTimer = setTimeout(() => search(q), 260);
 });
@@ -550,10 +607,119 @@ $('#q').addEventListener('keydown', (e) => {
     e.preventDefault();
     sel = (sel + (e.key === 'ArrowDown' ? 1 : -1) + results.length) % results.length;
     markSelected();
-  } else if (e.key === 'Enter') { e.preventDefault(); submitQuery(e.target.value); }
+  } else if (e.key === 'Enter' && e.shiftKey && results[sel]) { e.preventDefault(); if (queueable(results[sel])) addToQueue(results[sel]); }
+  else if (e.key === 'Enter') { e.preventDefault(); submitQuery(e.target.value); }
   else if (e.key === 'Escape') { closeResults(); e.target.blur(); }
 });
 $('#q').addEventListener('blur', () => setTimeout(closeResults, 120));
+
+// ---------- queue ----------
+// While Spotify plays and nothing else waits, Spotify songs go into Spotify's own queue, so they behave
+// as in the app (and show up there). Everything else waits here, in order: YouTube videos, previews,
+// and Spotify songs queued while something else plays. Queued songs come before what the album,
+// playlist or radio would play next, and Next skips to them, as in the app.
+const upNext = [];
+let spotifyNext = [], queueTimer;
+async function addToQueue(r) {
+  if (!queueable(r)) return;
+  // nothing playing (and nothing just asked to start): it plays now instead of waiting
+  if (!active || (!state.track && performance.now() - playAskedAt > 8000)) { play(r); return; }
+  if (r.source === 'spotify' && active === spotify && !upNext.length) {
+    await run(async () => {
+      const n = await spotify.addToQueue(r);
+      toast(n > 1 ? `${n} songs added to the queue` : n ? `Added to the queue: ${r.title}` : 'Nothing to add.');
+      refreshQueue();
+    });
+    return;
+  }
+  upNext.push(r);
+  toast(`Added to the queue: ${r.title}`);
+  renderQueue();
+}
+function playNextQueued() {
+  const r = upNext.shift();
+  if (!r) return false;
+  renderQueue();
+  play(r);
+  return true;
+}
+youtube.onEnded = () => playNextQueued();
+local.onEnded = () => playNextQueued();
+// Spotify gives no "ended" signal to a page: a waiting song takes over in the last second
+let handingOver = false;
+function queueTick(pos) {
+  const t = state.track;
+  if (handingOver || active !== spotify || !upNext.length || !state.playing || !t?.duration || t.duration - pos > 1200) return;
+  handingOver = true;
+  playNextQueued();
+  setTimeout(() => { handingOver = false; }, 4000);
+}
+
+async function refreshQueue() {
+  if ($('#queue-pop').hidden) return;
+  spotifyNext = active === spotify && spotify.connected ? await spotify.queue().catch(() => []) : [];
+  renderQueue();
+}
+function queueRow(r, { onPlay, onRemove } = {}) {
+  const li = document.createElement('li');
+  li.append(...rowFor(r));
+  if (onPlay) { li.classList.add('can'); li.addEventListener('click', onPlay); }
+  if (onRemove) {
+    const x = document.createElement('button');
+    x.className = 'q-x'; x.type = 'button'; x.setAttribute('aria-label', `Remove ${r.title} from the queue`); x.title = 'Remove';
+    x.innerHTML = '<svg><use href="#i-x"/></svg>';
+    x.addEventListener('click', (e) => { e.stopPropagation(); onRemove(); });
+    li.append(x);
+  }
+  return li;
+}
+function renderQueue() {
+  const box = $('#queue-list');
+  if (!box || $('#queue-pop').hidden) return;
+  box.replaceChildren();
+  const section = (title) => { const h = document.createElement('li'); h.className = 'group'; h.textContent = title; box.append(h); };
+  const t = state.track;
+  if (t) {
+    section('Now playing');
+    const now = queueRow({ title: t.title, artist: t.artist, thumb: t.art, art: t.art });
+    now.classList.add('now');
+    box.append(now);
+  }
+  if (upNext.length) {
+    section('Next in queue');
+    upNext.forEach((r, i) => box.append(queueRow(r, {
+      onPlay: () => { upNext.splice(i, 1); play(r); renderQueue(); },
+      onRemove: () => { upNext.splice(i, 1); renderQueue(); },
+    })));
+  }
+  if (spotifyNext.length) {
+    section(upNext.length ? 'Then, from Spotify' : 'Next up');
+    spotifyNext.slice(0, 20).forEach((r) => box.append(queueRow(r, { onPlay: () => play(r) })));
+  }
+  if (!upNext.length && !spotifyNext.length) {
+    const li = document.createElement('li'); li.className = 'note';
+    li.textContent = t ? 'Nothing lined up. Right-click a search result, or use its + button, to add it here.'
+      : 'Nothing playing. Search for a song, an album or one of your playlists.';
+    box.append(li);
+  }
+}
+function placeQueuePop() {
+  const b = $('#b-queue').getBoundingClientRect(), pop = $('#queue-pop');
+  const left = Math.max(12, Math.min(innerWidth - pop.offsetWidth - 12, b.left + b.width / 2 - pop.offsetWidth / 2));
+  pop.style.left = `${Math.round(left)}px`;
+  pop.style.bottom = `${Math.round(innerHeight - b.top + 10)}px`;
+}
+function toggleQueue(open = $('#queue-pop').hidden) {
+  $('#queue-pop').hidden = !open;
+  $('#b-queue').setAttribute('aria-expanded', String(open));
+  clearInterval(queueTimer);
+  if (!open) return;
+  renderQueue(); placeQueuePop(); refreshQueue();
+  queueTimer = setInterval(refreshQueue, 8000);
+}
+$('#b-queue').addEventListener('click', () => toggleQueue());
+addEventListener('pointerdown', (e) => { if (!$('#queue-pop').hidden && !e.target.closest('#queue-pop, #b-queue')) toggleQueue(false); });
+addEventListener('resize', () => { if (!$('#queue-pop').hidden) placeQueuePop(); });
 
 // ---------- chrome: idle, focus, fullscreen, lid, lyrics ----------
 let idleTimer, idleZoom = null;
@@ -564,7 +730,7 @@ function wake() {
   body.classList.remove('idle');
   clearTimeout(idleTimer);
   idleTimer = setTimeout(() => {
-    if (document.querySelector('dialog[open]') || $('#dock').matches(':hover') || !$('#vol-pop').hidden || document.activeElement === $('#q')) return;
+    if (document.querySelector('dialog[open]') || $('#dock').matches(':hover') || !$('#vol-pop').hidden || !$('#queue-pop').hidden || document.activeElement === $('#q')) return;
     body.classList.add('idle');
     requestAnimationFrame(() => placeDeck());
     // and the deck grows a touch, on top of whatever zoom is set; waking gives the zoom back
@@ -935,7 +1101,7 @@ window.addEventListener('keydown', (e) => {
     v: () => { cycle(VINYLS, 'vinyl', 1, (v) => `${v.name} pressing`); applyLook(); },
     r: () => { cycle(ROOMS, 'room', 1, (r) => `${r.name} room`); applyRoom(); },
     3: speed(33), 4: speed(45), 7: speed(78),
-    s: () => openSheet('sources'), '?': () => openSheet('keys'), Enter: toggleFullscreen,
+    s: () => openSheet('sources'), '?': () => openSheet('keys'), Enter: toggleFullscreen, q: () => toggleQueue(),
   };
   const fn = map[k];
   if (fn) { e.preventDefault(); fn(); }
